@@ -132,11 +132,16 @@ app.post("/api/convert", upload.single("file"), async (req, res) => {
   const inputFilename = req.file.filename;
   const outputFilename = `${path.basename(inputFilename, path.extname(inputFilename))}.${targetFormat}`;
 
-  // Paths as seen inside the docker container
+  // Output path relative to workdir
   const containerInputPath = `data/uploads/${inputFilename}`;
   const containerOutputPath = `data/uploads/${outputFilename}`;
 
-  const command = `docker exec -i app node scripts/node.js/export.js -i ${containerInputPath} -o ${containerOutputPath}`;
+  // Check if we are in production (running inside container) or development (running on host)
+  const isProduction = process.env.NODE_ENV === "production";
+
+  const command = isProduction
+    ? `node scripts/node.js/export.js -i ${containerInputPath} -o ${containerOutputPath}`
+    : `docker exec -i app node scripts/node.js/export.js -i ${containerInputPath} -o ${containerOutputPath}`;
 
   console.log(`Executing: ${command}`);
 
@@ -220,6 +225,16 @@ app.get("/api/download/:filename", (req, res) => {
     res.status(404).send("File not found");
   }
 });
+
+// Serve static files in production
+if (process.env.NODE_ENV === "production") {
+  const clientBuildPath = path.join(__dirname, "../client/dist");
+  app.use(express.static(clientBuildPath));
+
+  app.get("*", (req, res) => {
+    res.sendFile(path.join(clientBuildPath, "index.html"));
+  });
+}
 
 app.listen(port, () => {
   console.log(`Server running at http://localhost:${port}`);

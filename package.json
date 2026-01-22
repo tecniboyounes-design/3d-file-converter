@@ -8,7 +8,9 @@
     "server": "node server/index.js",
     "client": "cd client && npm run dev",
     "dev": "echo \"Run 'npm run server' and 'npm run client' in separate terminals\"",
-    "install:all": "npm install && cd client && npm install"
+    "install:all": "npm install && cd client && npm install",
+    "build": "cd client && npm install && npm run build",
+    "start:prod": "NODE_ENV=production node server/index.js"
   },
   "author": "Francisco Avila <elfrank.ab@gmail.com> (http://github.com/elfrank/)",
   "license": "MIT",
