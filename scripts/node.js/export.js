@@ -1,10 +1,10 @@
-const util = require('util');
-const path = require('path');
+const util = require("util");
+const path = require("path");
 
-const exec = util.promisify(require('child_process').exec);
-const { argv } = require('./utils/args').yargs;
+const exec = util.promisify(require("child_process").exec);
+const { argv } = require("./utils/args").yargs;
 
-const BASE_DIR = '/usr/src/app';
+const BASE_DIR = "/usr/src/app";
 const BLENDER_SCRIPTS_DIR = `${BASE_DIR}/scripts/blender`;
 const SCRIPT_NAME = `export`;
 
@@ -14,26 +14,26 @@ async function runPipeline(pipelineSteps = []) {
     const { stdout, stderr } = await exec(stepCommand);
 
     if (stdout) {
-      console.log('stdout:', stdout);
+      console.log("stdout:", stdout);
     }
 
     if (stderr) {
-      console.log('stderr:', stderr);
+      console.log("stderr:", stderr);
     }
   }
 }
 
 (async () => {
   try {
-    const {
-      inputFile,
-      outputFile,
-    } = argv;
+    const { inputFile, outputFile } = argv;
 
     const outputFilePath = `${outputFile}`;
-    const outputFileFormat = path.extname(outputFilePath).replace('.', '');
+    const outputFileFormat = path.extname(outputFilePath).replace(".", "");
     const inputFilePath = `${inputFile}`;
-    const inputFileFormat = 'obj';
+    const inputFileFormat = path
+      .extname(inputFilePath)
+      .replace(".", "")
+      .toLowerCase();
 
     const exportPipelineCmd = [
       // environment variables to pass to the python script
@@ -42,12 +42,12 @@ async function runPipeline(pipelineSteps = []) {
       `INPUT_FILE_PATH=${inputFilePath}`,
       `INPUT_FILE_FORMAT=${inputFileFormat}`,
       // call blender
-      'blender',
+      "blender",
       // blender cli parameters
-      '--background', // run headless
-      '-noaudio',
+      "--background", // run headless
+      "-noaudio",
       `-P ${BLENDER_SCRIPTS_DIR}/${SCRIPT_NAME}.py`,
-    ].join(' ');
+    ].join(" ");
 
     const exportPipeline = [exportPipelineCmd];
     await runPipeline(exportPipeline);
