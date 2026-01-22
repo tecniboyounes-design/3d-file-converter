@@ -1,0 +1,20 @@
+# private environment variables
+.env
+
+# folders with files we don't want to track
+data/**/*
+
+# dependencies
+node_modules/
+
+# do not ignore ".keep" files
+!**/*/.keep
+
+# do not ignore fixture files
+!data/input/
+!data/output/
+!data/fixtures/
+!data/fixtures/**/*
+
+# common hidden files
+.DS_Store
