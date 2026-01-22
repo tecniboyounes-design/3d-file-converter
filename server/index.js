@@ -135,9 +135,15 @@ app.post("/api/convert", upload.single("file"), async (req, res) => {
   // Check if we are in production (running inside container) or development (running on host)
   const isProduction = process.env.NODE_ENV === "production";
 
-  const command = isProduction
-    ? `node scripts/node.js/export.js -i ${containerInputPath} -o ${containerOutputPath}`
-    : `docker exec -i app node scripts/node.js/export.js -i ${containerInputPath} -o ${containerOutputPath}`;
+  let command;
+  if (isProduction) {
+    // Optimization: Spawn Blender directly to save memory (skip intermediate Node process)
+    const envVars = `OUTPUT_FILE_PATH=${containerOutputPath} OUTPUT_FILE_FORMAT=${targetFormat} INPUT_FILE_PATH=${containerInputPath} INPUT_FILE_FORMAT=${path.extname(inputFilename).replace(".", "").toLowerCase()}`;
+    command = `${envVars} blender --background -noaudio -P /usr/src/app/scripts/blender/export.py`;
+  } else {
+    // Development: Use Docker exec
+    command = `docker exec -i app node scripts/node.js/export.js -i ${containerInputPath} -o ${containerOutputPath}`;
+  }
 
   console.log(`Executing: ${command}`);
 
