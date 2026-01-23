@@ -121,7 +121,7 @@ function App() {
         )}
       </div>
 
-      <h1 className="title">3D File Converter test</h1>
+      <h1 className="title">3D File Converter</h1>
       <p className="subtitle">Convert your 3D models to standard formats</p>
 
       <div className="glass-card">
