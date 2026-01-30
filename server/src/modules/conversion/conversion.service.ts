@@ -85,7 +85,11 @@ export async function convertFile(
     
     if (normalizedOutputFormat === 'dxf') {
       // Direct DWG → DXF via ODA
-      await odaConvert(inputPath, 'DXF');
+      const odaResultPath = await odaConvert(inputPath, 'DXF');
+      // Rename to expected output path if different
+      if (odaResultPath !== outputPath) {
+        await fs.move(odaResultPath, outputPath, { overwrite: true });
+      }
       tool = 'oda';
     } else {
       // DWG → DXF → target
@@ -114,14 +118,21 @@ export async function convertFile(
     
     if (inputFormat === 'dxf') {
       // Direct DXF → DWG via ODA
-      await odaConvert(inputPath, 'DWG');
+      const odaResultPath = await odaConvert(inputPath, 'DWG');
+      // Rename to expected output path if different
+      if (odaResultPath !== outputPath) {
+        await fs.move(odaResultPath, outputPath, { overwrite: true });
+      }
       tool = 'oda';
     } else {
       // Source → DXF → DWG
       const tempDxfPath = path.join(inputDir, `temp_${Date.now()}.dxf`);
       try {
         await blenderConvert(inputPath, tempDxfPath);
-        await odaConvert(tempDxfPath, 'DWG');
+        const odaResultPath = await odaConvert(tempDxfPath, 'DWG');
+        
+        // Rename the ODA output to expected output path
+        await fs.move(odaResultPath, outputPath, { overwrite: true });
       } finally {
         // Cleanup temp DXF
         await fs.remove(tempDxfPath).catch(() => {});

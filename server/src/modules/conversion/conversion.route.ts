@@ -28,8 +28,16 @@ export async function conversionRoutes(fastify: FastifyInstance) {
     }
 
     // Get the target format from fields (multipart form data)
-    const fields = data.fields as Record<string, { value?: string }>;
-    const targetFormat = fields?.format?.value || 'glb';
+    // @fastify/multipart returns fields with { value: string } structure
+    const fields = data.fields as Record<string, { value?: string } | string>;
+    
+    let targetFormat = 'glb';
+    if (fields?.format) {
+      const formatField = fields.format as { value?: string } | string;
+      targetFormat = typeof formatField === 'string' 
+        ? formatField 
+        : (formatField?.value || 'glb');
+    }
 
     // Validate output format
     if (!isSupportedOutputFormat(targetFormat)) {
