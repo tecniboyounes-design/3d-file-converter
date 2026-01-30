@@ -1,13 +1,57 @@
-version: "3.7"
+version: "3.8"
+
 services:
-  app:
+  # ============================================================
+  # Backend - Fastify + TypeScript Server
+  # ============================================================
+  backend:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: app
-    image: 3d-file-converter
-    command: tail -f /dev/null
+      platforms:
+        - linux/amd64
+    container_name: 3d-converter-backend
+    image: 3d-converter-backend:latest
     ports:
-    - "8000:8000"
+      - "3001:3001"
+    environment:
+      - NODE_ENV=production
+      - PORT=3001
+      - MAX_CONCURRENT_BLENDER=2
+      - MAX_CONCURRENT_ASSIMP=5
+      - CONVERSION_TIMEOUT=300000
     volumes:
-      - ./:/usr/src/app
+      - uploads:/usr/src/app/data/uploads
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:3001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    restart: unless-stopped
+
+  # ============================================================
+  # Frontend - React + Vite with Nginx
+  # ============================================================
+  frontend:
+    build:
+      context: ./client
+      dockerfile: Dockerfile
+    container_name: 3d-converter-frontend
+    image: 3d-converter-frontend:latest
+    ports:
+      - "8080:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+volumes:
+  uploads:
+    driver: local

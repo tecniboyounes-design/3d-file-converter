@@ -1,4 +1,7 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
+
+// API base URL - uses environment variable or defaults to same origin
+const API_URL = import.meta.env.VITE_API_URL || "";
 
 function App() {
   const [file, setFile] = useState(null);
@@ -7,28 +10,30 @@ function App() {
   const [downloadUrl, setDownloadUrl] = useState(null);
   const [errorMessage, setErrorMessage] = useState("");
   const [isExiting, setIsExiting] = useState(false);
+  const [conversionInfo, setConversionInfo] = useState(null);
+  const [serverInfo, setServerInfo] = useState(null);
 
-  // Clean up old files on app load (refresh/start)
-  React.useEffect(() => {
-    fetch("/api/cleanup", { method: "POST" }).catch(err =>
-      console.error("Failed to cleanup on load:", err),
-    );
+  // Fetch server info on app load
+  useEffect(() => {
+    fetch(`${API_URL}/info`)
+      .then(res => res.json())
+      .then(data => setServerInfo(data))
+      .catch(err => console.error("Failed to fetch server info:", err));
   }, []);
 
-  // Auto-dismiss toast notifications after 3 seconds
-  React.useEffect(() => {
+  // Auto-dismiss toast notifications after 4 seconds
+  useEffect(() => {
     if (status === "success" || status === "error") {
-      setIsExiting(false); // Reset exit state on new status
+      setIsExiting(false);
 
-      // Start exit animation slightly before removal
       const exitTimer = setTimeout(() => {
         setIsExiting(true);
-      }, 2700); // 2.7s - start exit animation
+      }, 3700);
 
       const removeTimer = setTimeout(() => {
         setStatus("idle");
         setIsExiting(false);
-      }, 3000); // 3.0s - actually remove
+      }, 4000);
 
       return () => {
         clearTimeout(exitTimer);
@@ -43,6 +48,7 @@ function App() {
       setStatus("idle");
       setErrorMessage("");
       setDownloadUrl(null);
+      setConversionInfo(null);
       setIsExiting(false);
     }
   };
@@ -55,6 +61,7 @@ function App() {
       setStatus("idle");
       setErrorMessage("");
       setDownloadUrl(null);
+      setConversionInfo(null);
       setIsExiting(false);
     }
   };
@@ -66,13 +73,13 @@ function App() {
 
   const handleConvert = async () => {
     if (!file) {
-      // If no file selected, trigger file input
       document.getElementById("fileInput").click();
       return;
     }
 
     setStatus("converting");
     setErrorMessage("");
+    setConversionInfo(null);
     setIsExiting(false);
 
     const formData = new FormData();
@@ -80,23 +87,38 @@ function App() {
     formData.append("format", format);
 
     try {
-      const response = await fetch("/api/convert", {
+      const response = await fetch(`${API_URL}/api/convert`, {
         method: "POST",
         body: formData,
       });
 
+      const data = await response.json();
+
       if (!response.ok) {
-        throw new Error("Conversion failed");
+        throw new Error(data.message || "Conversion failed");
       }
 
-      const data = await response.json();
-      setDownloadUrl(data.downloadUrl);
+      setDownloadUrl(`${API_URL}${data.downloadUrl}`);
+      setConversionInfo({
+        tool: data.tool,
+        duration: data.duration,
+      });
       setStatus("success");
     } catch (error) {
       console.error(error);
       setStatus("error");
-      setErrorMessage("Conversion failed. Please try again.");
+      setErrorMessage(error.message || "Conversion failed. Please try again.");
     }
+  };
+
+  const getToolBadge = (tool) => {
+    const badges = {
+      assimp: { label: "⚡ Assimp", color: "#10b981" },
+      blender: { label: "🎨 Blender", color: "#3b82f6" },
+      oda: { label: "📐 ODA", color: "#8b5cf6" },
+      pipeline: { label: "🔗 Pipeline", color: "#f59e0b" },
+    };
+    return badges[tool] || { label: tool, color: "#6b7280" };
   };
 
   return (
@@ -107,7 +129,22 @@ function App() {
           <div className={`toast toast-success ${isExiting ? "exit" : ""}`}>
             <div>
               <p className="toast-title">Conversion Successful!</p>
-              <p className="toast-desc">Your file is ready to download.</p>
+              <p className="toast-desc">
+                {conversionInfo && (
+                  <>
+                    Converted in {conversionInfo.duration}ms using{" "}
+                    <span style={{ 
+                      background: getToolBadge(conversionInfo.tool).color,
+                      padding: "2px 6px",
+                      borderRadius: "4px",
+                      color: "white",
+                      fontSize: "0.8rem"
+                    }}>
+                      {getToolBadge(conversionInfo.tool).label}
+                    </span>
+                  </>
+                )}
+              </p>
             </div>
           </div>
         )}
@@ -122,7 +159,14 @@ function App() {
       </div>
 
       <h1 className="title">3D File Converter</h1>
-      <p className="subtitle">Convert your 3D models to standard formats</p>
+      <p className="subtitle">
+        Convert your 3D models to standard formats
+        {serverInfo && (
+          <span style={{ fontSize: "0.75rem", opacity: 0.7, display: "block", marginTop: "4px" }}>
+            Powered by Blender {serverInfo.tools?.blender} • Assimp • ODA
+          </span>
+        )}
+      </p>
 
       <div className="glass-card">
         <div
@@ -136,7 +180,7 @@ function App() {
             id="fileInput"
             style={{ display: "none" }}
             onChange={handleFileChange}
-            accept=".obj,.fbx,.gltf,.glb,.dxf"
+            accept=".obj,.fbx,.gltf,.glb,.dxf,.dwg"
           />
 
           <div className="plus-icon-circle">+</div>
@@ -153,6 +197,9 @@ function App() {
           ) : (
             <div>
               <p className="drop-text">Drop files here</p>
+              <p className="drop-subtext">
+                Supports OBJ, FBX, GLTF, GLB, DXF, DWG
+              </p>
             </div>
           )}
         </div>
@@ -165,7 +212,7 @@ function App() {
                 color: "#40513B",
                 fontWeight: "bold",
                 fontSize: "0.9rem",
-                margin: 0, // Reset margin for flex layout
+                margin: 0,
               }}
             >
               Target Format:
@@ -180,7 +227,8 @@ function App() {
               <option value="gltf">glTF (JSON)</option>
               <option value="obj">OBJ</option>
               <option value="fbx">FBX</option>
-              <option value="dxf">DXF</option>
+              <option value="dxf">DXF (CAD)</option>
+              <option value="dwg">DWG (AutoCAD)</option>
             </select>
           </div>
 
