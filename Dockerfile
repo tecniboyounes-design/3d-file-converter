@@ -6,7 +6,7 @@
 # ============================================================
 
 # ============================================================
-# STAGE 1: BUILD (Node.js dependencies + Frontend)
+# STAGE 1: BUILD (Node.js dependencies + Frontend + TypeScript)
 # ============================================================
 FROM --platform=linux/amd64 node:20-slim AS builder
 
@@ -19,6 +19,12 @@ RUN npm ci --omit=dev
 # Copy and build frontend
 COPY client ./client
 WORKDIR /app/client
+RUN npm ci && npm run build
+
+# Build server (TypeScript -> JavaScript)
+WORKDIR /app
+COPY server ./server
+WORKDIR /app/server
 RUN npm ci && npm run build
 
 # ============================================================
@@ -132,9 +138,11 @@ WORKDIR /usr/src/app
 # Copy built assets from builder stage
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/client/dist ./client/dist
+COPY --from=builder /app/server/dist ./server/dist
+COPY --from=builder /app/server/node_modules ./server/node_modules
 
-# Copy server and scripts
-COPY server ./server
+# Copy server package.json (for module resolution) and scripts
+COPY server/package.json ./server/
 COPY scripts ./scripts
 COPY package.json ./
 
@@ -149,9 +157,9 @@ ENV PORT=3001
 
 EXPOSE 3001
 
-# Health check (will work after /health endpoint is added)
+# Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-    CMD curl -f http://localhost:3001/ || exit 1
+    CMD curl -f http://localhost:3001/health || exit 1
 
-# Start the server
-CMD ["node", "server/index.js"]
+# Start the Fastify server (TypeScript compiled to dist/)
+CMD ["node", "server/dist/server.js"]
