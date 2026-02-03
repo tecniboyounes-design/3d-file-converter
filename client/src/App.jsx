@@ -85,6 +85,10 @@ function App() {
     const formData = new FormData();
     formData.append("file", file);
     formData.append("format", format);
+    
+    // Debug: Log what we're sending
+    console.log("Converting with format:", format);
+    console.log("FormData format:", formData.get("format"));
 
     try {
       const response = await fetch(`${API_URL}/api/convert`, {

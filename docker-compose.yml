@@ -20,6 +20,10 @@ services:
       - MAX_CONCURRENT_BLENDER=2
       - MAX_CONCURRENT_ASSIMP=5
       - CONVERSION_TIMEOUT=300000
+      # Autodesk APS credentials for ACIS solid conversion
+      - APS_CLIENT_ID=TBw0Kuv5UtBl9k3UCYG8FlsARt0dyCG5ULDxhdGzjIiBNkBf
+      - APS_CLIENT_SECRET=jGTeDQso4RH3rYmHPPe8PYCRTrHpyWXApKADKosdu3bD7QgoqWfOMNAOBPUsrsFi
+      - APS_BUCKET_KEY=tecnibo-room-planner-server-side-20250657
     volumes:
       - uploads:/usr/src/app/data/uploads
     healthcheck:

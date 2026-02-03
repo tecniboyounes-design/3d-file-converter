@@ -56,9 +56,23 @@ elif input_file_format == "fbx":
 elif input_file_format in ("gltf", "glb"):
   bpy.ops.import_scene.gltf(filepath=input_file_path)
 elif input_file_format == "dxf":
+  # Check if it's a binary DXF (not supported by Blender)
+  with open(input_file_path, 'rb') as f:
+    header = f.read(22)
+    if b'AutoCAD Binary DXF' in header:
+      print("[Blender] ERROR: Binary DXF format not supported. Convert to ASCII DXF first.")
+      sys.exit(1)
+  
   # Enable DXF importer
   enable("io_import_dxf", default_set=True, persistent=True)
-  bpy.ops.import_scene.dxf(filepath=input_file_path)
+  try:
+    result = bpy.ops.import_scene.dxf(filepath=input_file_path)
+    if result != {'FINISHED'}:
+      print(f"[Blender] ERROR: DXF import returned {result}")
+      sys.exit(1)
+  except Exception as e:
+    print(f"[Blender] ERROR: DXF import failed: {e}")
+    sys.exit(1)
 else:
   print(f"[Blender] ERROR: Unsupported input format: {input_file_format}")
   sys.exit(1)

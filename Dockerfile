@@ -131,6 +131,24 @@ RUN printf '#!/bin/bash\nxvfb-run -a /usr/bin/ODAFileConverter "$@"\n' > /usr/lo
     && chmod +x /usr/local/bin/oda-convert
 
 # ============================================================
+# INSTALL FREECAD (for ACIS 3D solid handling in DXF/DWG)
+# ============================================================
+# Use the Debian package but run via python with FreeCAD modules
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    freecad \
+    python3-pyside2.qtcore \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
+
+# Create wrapper script for FreeCAD (uses Python with FreeCAD modules via xvfb)
+# The key is to use python3 with the FreeCAD path, not freecadcmd directly
+RUN printf '#!/bin/bash\nexport QT_QPA_PLATFORM=offscreen\nexport FREECAD_USER_HOME=/tmp/freecad\nmkdir -p /tmp/freecad\nxvfb-run -a python3 "$@"\n' > /usr/local/bin/freecad-convert \
+    && chmod +x /usr/local/bin/freecad-convert
+
+# Test that FreeCAD Python modules can be imported
+RUN xvfb-run -a python3 -c "import sys; sys.path.insert(0, '/usr/lib/freecad/lib'); import FreeCAD; print('FreeCAD', FreeCAD.Version())" || echo "FreeCAD modules check"
+
+# ============================================================
 # COPY APPLICATION
 # ============================================================
 WORKDIR /usr/src/app

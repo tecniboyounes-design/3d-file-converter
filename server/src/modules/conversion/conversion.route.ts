@@ -21,54 +21,55 @@ export async function conversionRoutes(fastify: FastifyInstance) {
    * POST /api/convert - Upload and convert a 3D file
    */
   fastify.post('/convert', async (request: FastifyRequest, reply: FastifyReply) => {
-    const data = await request.file();
+    // Parse all parts of the multipart request
+    const parts = request.parts();
     
-    if (!data) {
+    let filename: string | null = null;
+    let inputPath: string | null = null;
+    let targetFormat = 'glb';
+    const uploadDir = path.resolve(config.uploadDir);
+    
+    // Ensure upload directory exists
+    await fs.ensureDir(uploadDir);
+    
+    for await (const part of parts) {
+      if (part.type === 'file') {
+        // Save file immediately while streaming
+        filename = part.filename;
+        const safeFilename = sanitizeFilename(filename);
+        const uniqueFilename = generateUniqueFilename(safeFilename);
+        inputPath = path.join(uploadDir, uniqueFilename);
+        await pipeline(part.file, fs.createWriteStream(inputPath));
+        fastify.log.info(`File uploaded: ${uniqueFilename}`);
+      } else if (part.type === 'field' && part.fieldname === 'format') {
+        targetFormat = String(part.value);
+      }
+    }
+    
+    if (!inputPath || !filename) {
       throw new ValidationError('No file uploaded');
     }
-
-    // Get the target format from fields (multipart form data)
-    // @fastify/multipart returns fields with { value: string } structure
-    const fields = data.fields as Record<string, { value?: string } | string>;
     
-    let targetFormat = 'glb';
-    if (fields?.format) {
-      const formatField = fields.format as { value?: string } | string;
-      targetFormat = typeof formatField === 'string' 
-        ? formatField 
-        : (formatField?.value || 'glb');
-    }
+    fastify.log.info(`Target format: ${targetFormat}`);
 
     // Validate output format
     if (!isSupportedOutputFormat(targetFormat)) {
+      await fs.remove(inputPath).catch(() => {});
       throw new ValidationError(
         `Unsupported output format: ${targetFormat}. Supported: ${SUPPORTED_OUTPUT_FORMATS.join(', ')}`
       );
     }
 
     // Validate input format
-    const inputFormat = getExtension(data.filename);
+    const inputFormat = getExtension(filename);
     if (!isSupportedInputFormat(inputFormat)) {
+      await fs.remove(inputPath).catch(() => {});
       throw new ValidationError(
         `Unsupported input format: ${inputFormat}. Supported: obj, fbx, gltf, glb, dxf, dwg`
       );
     }
 
-    // Generate unique filename and save to disk
-    const safeFilename = sanitizeFilename(data.filename);
-    const uniqueFilename = generateUniqueFilename(safeFilename);
-    const uploadDir = path.resolve(config.uploadDir);
-    const inputPath = path.join(uploadDir, uniqueFilename);
-
     try {
-      // Ensure upload directory exists
-      await fs.ensureDir(uploadDir);
-
-      // Save uploaded file
-      await pipeline(data.file, fs.createWriteStream(inputPath));
-
-      fastify.log.info(`File uploaded: ${uniqueFilename}`);
-
       // Perform conversion
       const result = await convertFile(inputPath, targetFormat);
 

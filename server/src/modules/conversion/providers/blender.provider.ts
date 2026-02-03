@@ -6,6 +6,7 @@
 
 import { spawn, ChildProcess } from 'child_process';
 import path from 'path';
+import fs from 'fs-extra';
 import { ConversionError, TimeoutError } from '../../../common/errors';
 import { BLENDER_SCRIPT_PATH } from '../../../common/constants';
 import config from '../../../config/env';
@@ -34,6 +35,61 @@ export async function blenderConvert(
 
   // Use p-limit to queue heavy conversions
   return blenderLimit(() => executeBlender(inputPath, outputPath, timeout));
+}
+
+/**
+ * Check if output file has valid geometry (not empty)
+ * Different formats have different "empty" signatures
+ */
+async function checkOutputValidity(outputPath: string, format: string): Promise<boolean> {
+  try {
+    const stat = await fs.stat(outputPath);
+    
+    // Size thresholds for "essentially empty" files
+    // These are based on empty file sizes when Blender exports with no geometry
+    const emptyThresholds: Record<string, number> = {
+      obj: 100,   // Empty OBJ is ~68 bytes (header + mtllib ref)
+      stl: 100,   // Empty STL is ~83 bytes (header only)
+      glb: 500,   // Empty GLB has JSON structure ~400-500 bytes
+      gltf: 500,  // Empty GLTF has JSON structure
+      fbx: 1000,  // Empty FBX has metadata ~800-1000 bytes
+      ply: 100,   // Empty PLY header only
+    };
+    
+    const threshold = emptyThresholds[format] || 100;
+    
+    if (stat.size <= threshold) {
+      console.log(`[Blender] Output file too small (${stat.size} bytes), likely empty`);
+      return false;
+    }
+    
+    // For OBJ files, also check if there are any vertices
+    if (format === 'obj') {
+      const content = await fs.readFile(outputPath, 'utf-8');
+      const hasVertices = /^v\s+[\d.-]+\s+[\d.-]+\s+[\d.-]+/m.test(content);
+      if (!hasVertices) {
+        console.log(`[Blender] OBJ file has no vertices`);
+        return false;
+      }
+    }
+    
+    // For STL files, check for facet definitions
+    if (format === 'stl') {
+      const content = await fs.readFile(outputPath, 'utf-8');
+      const hasFacets = content.includes('facet normal') || content.includes('endsolid');
+      // Binary STL check
+      const header = await fs.readFile(outputPath);
+      if (!hasFacets && stat.size === 84) {
+        console.log(`[Blender] STL file has no facets`);
+        return false;
+      }
+    }
+    
+    return true;
+  } catch (err) {
+    console.error(`[Blender] Error checking output validity:`, err);
+    return false;
+  }
 }
 
 async function executeBlender(
@@ -107,8 +163,23 @@ async function executeBlender(
         return;
       }
 
-      console.log(`[Blender] Conversion successful`);
-      resolve(outputPath);
+      // Check if output file is essentially empty (no geometry)
+      // This catches cases like DXF with ACIS solids that import as EMPTYs
+      checkOutputValidity(outputPath, outputFormat)
+        .then((isValid) => {
+          if (!isValid) {
+            reject(new ConversionError(
+              'Blender conversion produced empty output (no geometry found)',
+              'The input file may contain unsupported geometry types like ACIS 3D solids'
+            ));
+            return;
+          }
+          console.log(`[Blender] Conversion successful`);
+          resolve(outputPath);
+        })
+        .catch((err) => {
+          reject(new ConversionError(`Failed to validate output: ${err.message}`));
+        });
     });
   });
 }

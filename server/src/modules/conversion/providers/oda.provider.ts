@@ -212,6 +212,57 @@ export async function dxfToDwg(
 }
 
 /**
+ * Convert binary DXF to ASCII DXF via ODA
+ * ODA always outputs ASCII DXF format, so we convert binary DXF to "ASCII DXF"
+ * by converting to DXF format (outputs ASCII)
+ * 
+ * @param binaryDxfPath - Path to binary DXF file
+ * @param options - Conversion options
+ * @returns Path to ASCII DXF file (same directory, different name)
+ */
+export async function binaryDxfToAscii(
+  binaryDxfPath: string,
+  options?: OdaConversionOptions
+): Promise<string> {
+  console.log(`[ODA] Converting binary DXF to ASCII: ${path.basename(binaryDxfPath)}`);
+  
+  // ODA converts DXF to DXF, which always outputs in ASCII format
+  // We create a separate input directory so the output doesn't conflict with cleanup
+  const inputDir = path.dirname(binaryDxfPath);
+  const inputFileName = path.basename(binaryDxfPath, '.dxf');
+  const timestamp = Date.now();
+  
+  // Create a unique temp directory for the binary DXF input
+  const tempBinaryDir = path.join(inputDir, `binary_dxf_${timestamp}`);
+  await fs.ensureDir(tempBinaryDir);
+  const tempInputPath = path.join(tempBinaryDir, `${inputFileName}.dxf`);
+  
+  // Copy original to temp directory
+  await fs.copy(binaryDxfPath, tempInputPath);
+  
+  try {
+    // ODA will convert the binary DXF to ASCII DXF
+    // The output will be in inputDir (parent of tempBinaryDir) with _ascii suffix
+    const asciiOutputName = `${inputFileName}_ascii_${timestamp}.dxf`;
+    const expectedAsciiPath = path.join(inputDir, asciiOutputName);
+    
+    // Run ODA conversion - it outputs to the temp directory
+    const odaResult = await odaConvert(tempInputPath, 'DXF', options);
+    
+    // Move/rename to our expected path with _ascii suffix
+    if (odaResult !== expectedAsciiPath) {
+      await fs.move(odaResult, expectedAsciiPath, { overwrite: true });
+    }
+    
+    console.log(`[ODA] Binary DXF converted to ASCII: ${expectedAsciiPath}`);
+    return expectedAsciiPath;
+  } finally {
+    // Clean up temp binary directory (doesn't affect ASCII output)
+    await fs.remove(tempBinaryDir).catch(() => {});
+  }
+}
+
+/**
  * Check if ODA File Converter is available
  */
 export async function isOdaAvailable(): Promise<boolean> {
