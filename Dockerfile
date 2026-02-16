@@ -120,12 +120,25 @@ RUN ln -sf /usr/lib/x86_64-linux-gnu/libxcb-util.so.1 /usr/lib/x86_64-linux-gnu/
 # Download and install ODA File Converter DEB package
 # Version 26.12 from official ODA website: https://www.opendesign.com/guestfiles/oda_file_converter
 ARG ODA_VERSION=26.12
-RUN curl -L -o /tmp/oda.deb \
-    "https://www.opendesign.com/guestfiles/get?filename=ODAFileConverter_QT6_lnxX64_8.3dll_${ODA_VERSION}.deb" \
-    && dpkg -i /tmp/oda.deb || true \
-    && apt-get update && apt-get install -f -y --no-install-recommends \
-    && rm /tmp/oda.deb \
-    && rm -rf /var/lib/apt/lists/*
+RUN set -eux; \
+    curl -fsSL -o /tmp/oda.deb \
+      "https://www.opendesign.com/guestfiles/get?filename=ODAFileConverter_QT6_lnxX64_8.3dll_${ODA_VERSION}.deb"; \
+    if ! dpkg -i /tmp/oda.deb; then \
+      i=1; \
+      while [ "$i" -le 3 ]; do \
+        if apt-get update && apt-get install -f -y --no-install-recommends; then \
+          break; \
+        fi; \
+        if [ "$i" -eq 3 ]; then \
+          exit 1; \
+        fi; \
+        sleep $((i * 5)); \
+        i=$((i + 1)); \
+      done; \
+      dpkg -i /tmp/oda.deb; \
+    fi; \
+    rm -f /tmp/oda.deb; \
+    rm -rf /var/lib/apt/lists/*
 
 # Verify ODA installation (the DEB installs to /usr/bin/ODAFileConverter which is a launcher script)
 RUN test -f /usr/bin/ODAFileConverter && echo "ODA File Converter installed successfully" \
