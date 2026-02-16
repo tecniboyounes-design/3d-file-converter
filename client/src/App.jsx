@@ -318,7 +318,7 @@ function App() {
         )}
       </div>
 
-      <h1 className="title">3D File Converter tesssssssstingggggg</h1>
+      <h1 className="title">3D File Converter</h1>
       <p className="subtitle">Convert multiple 3D files at once</p>
 
       <div className="glass-card">
