@@ -18,11 +18,15 @@
  *    - STEP/IGES → Mesh: FreeCAD → STL → Blender/Assimp
  *    - Any → STEP/IGES: Blender → STL → FreeCAD (solidification)
  * 
- * 6. Simple Mesh → Simple Mesh: Assimp → Blender → FreeCAD → APS (fallback chain)
+ * 6. IFC Routing (IfcOpenShell-based):
+ *    - IFC → Mesh/CAD: IfcConvert direct (OBJ/GLB/DAE/STEP/IGES)
+ *    - Any → IFC: Blender → OBJ → mesh_to_ifc.py (multi-object preservation)
  * 
- * 7. CAD formats: Blender → FreeCAD → APS (fallback chain)
+ * 7. Simple Mesh → Simple Mesh: Assimp → Blender → FreeCAD → APS (fallback chain)
  * 
- * 8. Fallback: Try full chain for any other formats
+ * 8. CAD formats: Blender → FreeCAD → APS (fallback chain)
+ * 
+ * 9. Fallback: Try full chain for any other formats
  * 
  * This allows converting ANY format to ANY format with maximum compatibility.
  */
@@ -41,7 +45,11 @@ import {
   convertCadToCad,
   apsConvert,
   isApsAvailable,
-  getHierarchyForObj
+  getHierarchyForObj,
+  ifcConvert,
+  meshToIfc,
+  isIfcConvertAvailable,
+  IFC_CONVERT_NATIVE_FORMATS
 } from './providers';
 import { 
   isSimpleMesh, 
@@ -60,12 +68,13 @@ import {
 } from '../../common/errors';
 import { 
   isSupportedInputFormat, 
-  isSupportedOutputFormat 
+  isSupportedOutputFormat,
+  isIfcFormat
 } from '../../common/constants';
 
 interface ConversionResult {
   outputPath: string;
-  tool: 'assimp' | 'blender' | 'oda' | 'pipeline' | 'aps';
+  tool: 'assimp' | 'blender' | 'oda' | 'pipeline' | 'aps' | 'ifcopenshell';
   duration: number;
 }
 
@@ -506,7 +515,135 @@ export async function convertFile(
   }
 
   // =====================================================
-  // 6. SIMPLE MESH → SIMPLE MESH: Assimp → Blender → FreeCAD → APS
+  // 6. IFC ROUTING (IfcOpenShell-based)
+  // =====================================================
+  const isIfcInput = isIfcFormat(inputFormat);
+  const isIfcOutput = isIfcFormat(normalizedOutputFormat);
+  
+  // 6a. IFC INPUT → Any format (Use IfcConvert)
+  if (isIfcInput) {
+    log(`Route: IFC input → ${normalizedOutputFormat.toUpperCase()}`);
+    
+    // Check if IfcConvert is available
+    if (!isIfcConvertAvailable()) {
+      log(`IfcConvert not available`, 'error');
+      throw new ConversionError(
+        'IFC conversion requires IfcConvert',
+        'IfcConvert binary not found. Make sure IfcOpenShell is installed in the Docker container.'
+      );
+    }
+    
+    // Check if IfcConvert can directly output this format
+    if (IFC_CONVERT_NATIVE_FORMATS.includes(normalizedOutputFormat)) {
+      log(`IfcConvert direct: IFC → ${normalizedOutputFormat.toUpperCase()}...`);
+      try {
+        await ifcConvert(inputPath, outputPath, {
+          useElementNames: true,
+          centerModel: true
+        });
+        log(`IfcConvert successful`, 'success');
+        return {
+          outputPath,
+          tool: 'ifcopenshell',
+          duration: Date.now() - startTime
+        };
+      } catch (err) {
+        log(`IfcConvert failed: ${err instanceof Error ? err.message : String(err)}`, 'error');
+        throw new ConversionError(
+          `Failed to convert IFC to ${normalizedOutputFormat.toUpperCase()}`,
+          `IfcConvert failed. Error: ${err instanceof Error ? err.message : String(err)}`
+        );
+      }
+    }
+    
+    // For formats not natively supported by IfcConvert, go IFC → OBJ → target
+    log(`Pipeline: IFC → OBJ → ${normalizedOutputFormat.toUpperCase()}`);
+    const tempObjPath = path.join(inputDir, `temp_${Date.now()}.obj`);
+    
+    try {
+      // Step 1: IFC → OBJ via IfcConvert
+      log(`Step 1: IFC → OBJ via IfcConvert...`);
+      await ifcConvert(inputPath, tempObjPath, {
+        useElementNames: true,
+        centerModel: true
+      });
+      log(`Step 1 complete`, 'success');
+      
+      // Step 2: OBJ → target format
+      log(`Step 2: OBJ → ${normalizedOutputFormat.toUpperCase()}...`);
+      await convertWithFullFallback(tempObjPath, outputPath);
+      log(`Step 2 complete`, 'success');
+      
+      return {
+        outputPath,
+        tool: 'pipeline',
+        duration: Date.now() - startTime
+      };
+    } catch (err) {
+      log(`IFC pipeline failed: ${err instanceof Error ? err.message : String(err)}`, 'error');
+      throw new ConversionError(
+        `Failed to convert IFC to ${normalizedOutputFormat.toUpperCase()}`,
+        `Error: ${err instanceof Error ? err.message : String(err)}`
+      );
+    } finally {
+      await fs.remove(tempObjPath).catch(() => {});
+    }
+  }
+  
+  // 6b. Any format → IFC OUTPUT (Use mesh_to_ifc.py)
+  if (isIfcOutput) {
+    log(`Route: ${inputFormat.toUpperCase()} → IFC`);
+    
+    const tempObjPath = path.join(inputDir, `temp_${Date.now()}.obj`);
+    
+    try {
+      // Step 1: Convert to OBJ via Blender (preserves groups/hierarchy)
+      if (inputFormat === 'obj') {
+        // Already OBJ, use directly
+        log(`Input is already OBJ, using directly...`);
+        await fs.copy(inputPath, tempObjPath);
+      } else if ((inputFormat as string) === 'dwg' || (inputFormat as string) === 'dxf') {
+        // DWG/DXF → OBJ via APS
+        log(`Step 1: DWG/DXF → OBJ via APS...`);
+        if (!isApsAvailable()) {
+          throw new ConversionError(
+            'DWG/DXF to IFC conversion requires Autodesk APS',
+            'Configure APS_CLIENT_ID and APS_CLIENT_SECRET environment variables.'
+          );
+        }
+        await apsConvert(inputPath, tempObjPath, { outputFormat: 'obj' });
+        log(`Step 1 complete`, 'success');
+      } else {
+        // Other formats → OBJ via Blender
+        log(`Step 1: ${inputFormat.toUpperCase()} → OBJ via Blender...`);
+        await blenderConvert(inputPath, tempObjPath);
+        log(`Step 1 complete`, 'success');
+      }
+      
+      // Step 2: OBJ → IFC via mesh_to_ifc.py
+      log(`Step 2: OBJ → IFC via mesh_to_ifc.py...`);
+      await meshToIfc(tempObjPath, outputPath);
+      log(`Step 2 complete`, 'success');
+      
+      log(`Pipeline complete: ${inputFormat.toUpperCase()} → OBJ → IFC`, 'success');
+      return {
+        outputPath,
+        tool: 'ifcopenshell',
+        duration: Date.now() - startTime
+      };
+    } catch (err) {
+      log(`Mesh → IFC failed: ${err instanceof Error ? err.message : String(err)}`, 'error');
+      throw new ConversionError(
+        `Failed to convert ${inputFormat.toUpperCase()} to IFC`,
+        `Error: ${err instanceof Error ? err.message : String(err)}`
+      );
+    } finally {
+      await fs.remove(tempObjPath).catch(() => {});
+    }
+  }
+
+  // =====================================================
+  // 7. SIMPLE MESH → SIMPLE MESH: Assimp → Blender → FreeCAD → APS
   // =====================================================
   if (isSimpleMesh(inputFormat) && isSimpleMesh(normalizedOutputFormat)) {
     log(`Route: Simple mesh → Simple mesh`);
@@ -522,7 +659,7 @@ export async function convertFile(
   }
 
   // =====================================================
-  // 7. CAD FORMATS: Blender → FreeCAD → APS
+  // 8. CAD FORMATS: Blender → FreeCAD → APS
   // =====================================================
   if (isCadFormat(inputFormat) || isCadFormat(normalizedOutputFormat)) {
     log(`Route: CAD format conversion`);
@@ -635,7 +772,7 @@ export async function convertFile(
   }
 
   // =====================================================
-  // 8. FALLBACK - Try full chain for any other formats
+  // 9. FALLBACK - Try full chain for any other formats
   // =====================================================
   log(`Route: Fallback chain`);
   tool = await convertWithFullFallback(inputPath, outputPath);

@@ -18,6 +18,7 @@ const SUPPORTED_FORMATS = [
   "stp",
   "iges",
   "igs",
+  "ifc",
 ];
 
 const MAX_FILES = 100;
@@ -333,7 +334,7 @@ function App() {
             id="fileInput"
             style={{ display: "none" }}
             onChange={handleFileChange}
-            accept=".obj,.stl,.fbx,.ply,.gltf,.glb,.dae,.3ds,.dxf,.dwg"
+            accept=".obj,.stl,.fbx,.ply,.gltf,.glb,.dae,.3ds,.dxf,.dwg,.step,.stp,.iges,.igs,.ifc"
             multiple
           />
 
@@ -346,7 +347,7 @@ function App() {
             <p className="drop-subtext">
               {files.length > 0 
                 ? `${files.length} file${files.length > 1 ? "s" : ""} in queue (max ${MAX_FILES})`
-                : "OBJ, STL, FBX, PLY, GLTF, GLB, DAE, 3DS, DXF, DWG, STEP, STP, IGES, IGS"
+                : "OBJ, STL, FBX, PLY, GLTF, GLB, DAE, 3DS, DXF, DWG, STEP, STP, IGES, IGS, IFC"
               }
             </p>
           </div>
@@ -492,6 +493,9 @@ function App() {
                 <option value="stp">STP</option>
                 <option value="iges">IGES</option>
                 <option value="igs">IGS</option>
+              </optgroup>
+              <optgroup label="BIM Formats">
+                <option value="ifc">IFC</option>
               </optgroup>
             </select>
           </div>

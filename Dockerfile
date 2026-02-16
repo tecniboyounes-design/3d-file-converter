@@ -6,6 +6,11 @@
 # ============================================================
 
 # ============================================================
+# STAGE 0: IFCOPENSHELL SOURCE (for extracting IfcConvert binary)
+# ============================================================
+FROM --platform=linux/amd64 aecgeeks/ifcopenshell:v0.8.0 AS ifcopenshell-source
+
+# ============================================================
 # STAGE 1: BUILD (Node.js dependencies + Frontend + TypeScript)
 # ============================================================
 FROM --platform=linux/amd64 node:20-slim AS builder
@@ -147,6 +152,38 @@ RUN printf '#!/bin/bash\nexport QT_QPA_PLATFORM=offscreen\nexport FREECAD_USER_H
 
 # Test that FreeCAD Python modules can be imported
 RUN xvfb-run -a python3 -c "import sys; sys.path.insert(0, '/usr/lib/freecad/lib'); import FreeCAD; print('FreeCAD', FreeCAD.Version())" || echo "FreeCAD modules check"
+
+# ============================================================
+# INSTALL IFCOPENSHELL (for IFC format support)
+# ============================================================
+# Copy IfcConvert binary from official IfcOpenShell image (multi-stage build)
+COPY --from=ifcopenshell-source /usr/bin/IfcConvert /usr/local/bin/IfcConvert
+
+# Copy required shared libraries from IfcOpenShell image
+# These are OpenCASCADE, HDF5, Boost, TBB, ICU libraries that IfcConvert was built against
+COPY --from=ifcopenshell-source /lib/x86_64-linux-gnu/libTK*.so.7 /lib/x86_64-linux-gnu/
+COPY --from=ifcopenshell-source /lib/x86_64-linux-gnu/libhdf5_serial*.so* /lib/x86_64-linux-gnu/
+COPY --from=ifcopenshell-source /lib/x86_64-linux-gnu/libboost_program_options.so* /lib/x86_64-linux-gnu/
+COPY --from=ifcopenshell-source /lib/x86_64-linux-gnu/libboost_regex.so* /lib/x86_64-linux-gnu/
+COPY --from=ifcopenshell-source /lib/x86_64-linux-gnu/libtbb*.so* /lib/x86_64-linux-gnu/
+COPY --from=ifcopenshell-source /lib/x86_64-linux-gnu/libicu*.so* /lib/x86_64-linux-gnu/
+
+# Install IfcOpenShell Python library and remaining runtime dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3-pip \
+    libxml2 \
+    libmpfr6 \
+    libgmp10 \
+    libtbb12 \
+    libtbbmalloc2 \
+    && pip3 install --break-system-packages ifcopenshell \
+    && ldconfig \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
+
+# Verify IfcConvert installation
+RUN IfcConvert --version || echo "IfcConvert binary installed"
+RUN python3 -c "import ifcopenshell; print('IfcOpenShell Python:', ifcopenshell.version)" || echo "IfcOpenShell Python installed"
 
 # ============================================================
 # COPY APPLICATION
