@@ -1,33 +1,13 @@
 {
   "name": "3d-file-converter",
   "version": "0.3.0",
-  "description": "A 3D File Exporter",
+  "description": "A 3D File Converter",
   "scripts": {
-    "lint": "eslint --format codeframe",
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "server": "node server/index.js",
-    "client": "cd client && npm run dev",
-    "dev": "echo \"Run 'npm run server' and 'npm run client' in separate terminals\"",
-    "install:all": "npm install && cd client && npm install",
-    "build": "cd client && npm install && npm run build",
-    "start:prod": "NODE_ENV=production node  server/index.js"
-  },  
-  "author": "Francisco Avila <elfrank.ab@gmail.com> (http://github.com/elfrank/)",
-  "license": "MIT",
-  "devDependencies": {
-    "eslint": "^7.3.1",
-    "eslint-config-airbnb": "^18.2.0",
-    "eslint-plugin-import": "^2.22.0",
-    "eslint-plugin-jsx-a11y": "^6.3.1",
-    "eslint-plugin-react": "^7.20.3",
-    "eslint-plugin-react-hooks": "^4.0.5"
+    "dev:server": "cd server && npm run dev",
+    "dev:client": "cd client && npm run dev",
+    "build:server": "cd server && npm run build",
+    "build:client": "cd client && npm run build",
+    "install:all": "npm install && cd client && npm install && cd ../server && npm install"
   },
-  "dependencies": {
-    "child_process": "^1.0.2",
-    "cors": "^2.8.5",
-    "express": "^4.19.2",
-    "fs-extra": "^11.2.0",
-    "multer": "^1.4.5-lts.1",
-    "yargs": "^15.4.0"
-  }
+  "license": "MIT"
 }

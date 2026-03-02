@@ -17,10 +17,6 @@ FROM --platform=linux/amd64 node:20-slim AS builder
 
 WORKDIR /app
 
-# Install root dependencies (for server)
-COPY package.json package-lock.json ./
-RUN npm ci --omit=dev
-
 # Copy and build frontend
 COPY client ./client
 WORKDIR /app/client
@@ -209,7 +205,6 @@ RUN python3 -c "import ifcopenshell; print('IfcOpenShell Python:', ifcopenshell.
 WORKDIR /usr/src/app
 
 # Copy built assets from builder stage
-COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/client/dist ./client/dist
 COPY --from=builder /app/server/dist ./server/dist
 COPY --from=builder /app/server/node_modules ./server/node_modules
