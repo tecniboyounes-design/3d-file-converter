@@ -67,6 +67,7 @@ import {
   ConversionError, 
   UnsupportedFormatError 
 } from '../../common/errors';
+import { logConversionError } from '../../common/errorLogger';
 import { 
   isSupportedInputFormat, 
   isSupportedOutputFormat,
@@ -126,6 +127,8 @@ function log(message: string, type: 'info' | 'success' | 'error' | 'warn' = 'inf
  * 
  * This function implements the "Assimp First, Blender Fallback" strategy
  * with special handling for DWG files via ODA.
+ * 
+ * Tracks conversion steps and logs errors to data/errorLogs on failure.
  */
 export async function convertFile(
   inputPath: string,
@@ -135,6 +138,13 @@ export async function convertFile(
   const inputFormat = getExtension(inputPath);
   const normalizedOutputFormat = outputFormat.toLowerCase();
   const inputFilename = path.basename(inputPath);
+
+  // Step tracking for error logging
+  const stepsCompleted: string[] = [];
+  let currentRoute = '';
+  let currentStep = '';
+
+  try {
 
   log(`Starting conversion: ${inputFormat.toUpperCase()} → ${normalizedOutputFormat.toUpperCase()}`);
   log(`Input file: ${inputFilename}`);
@@ -173,11 +183,14 @@ export async function convertFile(
   // =====================================================
   if ((inputFormat === 'dxf' && normalizedOutputFormat === 'dwg') ||
       (inputFormat === 'dwg' && normalizedOutputFormat === 'dxf')) {
+    currentRoute = 'DXF ↔ DWG swap (ODA)';
     log(`Route: DXF ↔ DWG swap`);
     log(`Trying ODA File Converter...`);
     const odaOutputFormat = normalizedOutputFormat.toUpperCase() as 'DXF' | 'DWG';
     try {
+      currentStep = `ODA: ${inputFormat.toUpperCase()} → ${normalizedOutputFormat.toUpperCase()}`;
       const odaOutputPath = await odaConvert(inputPath, odaOutputFormat);
+      stepsCompleted.push(`ODA: ${inputFormat.toUpperCase()} → ${normalizedOutputFormat.toUpperCase()}`);
       log(`ODA conversion successful`, 'success');
       // Move ODA output to expected output path if different
       if (odaOutputPath !== outputPath) {
@@ -203,18 +216,23 @@ export async function convertFile(
   // =====================================================
   if (normalizedOutputFormat === 'dwg' && inputFormat !== 'dxf'
       && !isBrepCadFormat(inputFormat) && !isIfcFormat(inputFormat)) {
+    currentRoute = `Any → DWG (via DXF intermediate)`;
     log(`Route: Any → DWG (via DXF intermediate)`);
     const tempDxfPath = path.join(inputDir, `temp_${Date.now()}.dxf`);
     
     try {
       // Step 1: Convert to DXF via Blender
+      currentStep = `Blender: ${inputFormat.toUpperCase()} → DXF`;
       log(`Step 1: Trying Blender (${inputFormat.toUpperCase()} → DXF)...`);
       await blenderConvert(inputPath, tempDxfPath);
+      stepsCompleted.push(`Blender: ${inputFormat.toUpperCase()} → DXF`);
       log(`Step 1: Blender conversion successful`, 'success');
       
       // Step 2: Convert DXF to DWG via ODA
+      currentStep = 'ODA: DXF → DWG';
       log(`Step 2: Trying ODA (DXF → DWG)...`);
       const odaOutputPath = await odaConvert(tempDxfPath, 'DWG');
+      stepsCompleted.push('ODA: DXF → DWG');
       log(`Step 2: ODA conversion successful`, 'success');
       
       // Move ODA output to expected output path
@@ -245,6 +263,7 @@ export async function convertFile(
   const inputIsDwgDxf = isDwgFormat(inputFormat) || inputFormat === 'dxf';
 
   if (inputIsDwgDxf) {
+    currentRoute = `DWG/DXF input → ${normalizedOutputFormat.toUpperCase()}`;
     log(`Route: DWG/DXF input → ${normalizedOutputFormat.toUpperCase()} output`);
 
     const outFmt = normalizedOutputFormat as string;
@@ -255,10 +274,12 @@ export async function convertFile(
       // Direct to OBJ/STL via APS
       if (outFmt === 'obj' || outFmt === 'stl') {
         try {
+          currentStep = `APS: ${inputFormat.toUpperCase()} → ${outFmt.toUpperCase()}`;
           log(`Trying APS direct (${inputFormat.toUpperCase()} → ${outFmt.toUpperCase()})...`);
           await apsConvert(inputPath, outputPath, {
             outputFormat: outFmt as 'obj' | 'stl'
           });
+          stepsCompleted.push(`APS: ${inputFormat.toUpperCase()} → ${outFmt.toUpperCase()}`);
           log(`APS conversion successful`, 'success');
           return {
             outputPath,
@@ -273,12 +294,16 @@ export async function convertFile(
         // Other formats: DWG/DXF → OBJ → target format via APS
         const tempObjPath = path.join(inputDir, `temp_aps_${Date.now()}.obj`);
         try {
+          currentStep = `APS: ${inputFormat.toUpperCase()} → OBJ`;
           log(`Pipeline: APS (${inputFormat.toUpperCase()} → OBJ) → ${outFmt.toUpperCase()}`);
           await apsConvert(inputPath, tempObjPath, { outputFormat: 'obj' });
+          stepsCompleted.push(`APS: ${inputFormat.toUpperCase()} → OBJ`);
           log(`APS → OBJ successful`, 'success');
 
+          currentStep = `Fallback: OBJ → ${outFmt.toUpperCase()}`;
           log(`Converting OBJ → ${outFmt.toUpperCase()}...`);
           await convertWithFullFallback(tempObjPath, outputPath);
+          stepsCompleted.push(`Fallback: OBJ → ${outFmt.toUpperCase()}`);
           log(`Pipeline complete via APS`, 'success');
           return {
             outputPath,
@@ -305,10 +330,12 @@ export async function convertFile(
       // Step 1: DWG → DXF via ODA (skip if input is already DXF)
       let dxfPath = inputPath;
       if (isDwgFormat(inputFormat)) {
+        currentStep = 'ODA: DWG → DXF';
         log(`Step 1: ODA (DWG → DXF)...`);
         const odaResult = await dwgToDxf(inputPath);
         await fs.move(odaResult, tempDxfPath, { overwrite: true });
         dxfPath = tempDxfPath;
+        stepsCompleted.push('ODA: DWG → DXF');
         log(`Step 1: ODA conversion successful`, 'success');
       }
 
@@ -317,20 +344,26 @@ export async function convertFile(
         // DXF → STL (Blender with decimation) → STP/IGES (FreeCAD solidification)
         const tempStlPath = path.join(inputDir, `temp_stl_${Date.now()}.stl`);
         try {
+          currentStep = 'Blender: DXF → STL (decimated)';
           log(`Step 2: Blender (DXF → decimated STL)...`);
           await blenderConvert(dxfPath, tempStlPath, { decimateTargetFaces: 20000 });
+          stepsCompleted.push('Blender: DXF → STL (decimated)');
           log(`Step 2: Blender successful`, 'success');
 
+          currentStep = `FreeCAD: STL → ${outFmt.toUpperCase()}`;
           log(`Step 3: FreeCAD (STL → ${outFmt.toUpperCase()})...`);
           await convertMeshToStep(tempStlPath, outputPath);
+          stepsCompleted.push(`FreeCAD: STL → ${outFmt.toUpperCase()}`);
           log(`Step 3: FreeCAD solidification successful`, 'success');
         } finally {
           await fs.remove(tempStlPath).catch(() => {});
         }
       } else {
         // DXF → target mesh format via Blender/Assimp fallback chain
+        currentStep = `Fallback: DXF → ${outFmt.toUpperCase()}`;
         log(`Step 2: DXF → ${outFmt.toUpperCase()} via fallback chain...`);
         await convertWithFullFallback(dxfPath, outputPath);
+        stepsCompleted.push(`Fallback: DXF → ${outFmt.toUpperCase()}`);
         log(`Step 2: Conversion successful`, 'success');
       }
 
@@ -358,10 +391,13 @@ export async function convertFile(
   // =====================================================
   if (normalizedOutputFormat === 'dxf'
       && !isBrepCadFormat(inputFormat) && !isIfcFormat(inputFormat)) {
+    currentRoute = `Any → DXF (Blender)`;
     log(`Route: Any → DXF`);
     log(`Trying Blender...`);
     try {
+      currentStep = `Blender: ${inputFormat.toUpperCase()} → DXF`;
       await blenderConvert(inputPath, outputPath);
+      stepsCompleted.push(`Blender: ${inputFormat.toUpperCase()} → DXF`);
       log(`Blender conversion successful`, 'success');
       return {
         outputPath,
@@ -387,13 +423,16 @@ export async function convertFile(
   
   // 5a. STEP/IGES INPUT → Any format
   if (isStepInput || isIgesInput) {
+    currentRoute = `STEP/IGES input → ${normalizedOutputFormat.toUpperCase()}`;
     log(`Route: STEP/IGES input → ${normalizedOutputFormat.toUpperCase()}`);
     
     // STEP/IGES → STEP/IGES (CAD-to-CAD via FreeCAD)
     if (isStepOutput || isIgesOutput) {
       log(`CAD-to-CAD conversion: ${inputFormat.toUpperCase()} → ${normalizedOutputFormat.toUpperCase()}`);
       try {
+        currentStep = `FreeCAD CAD-to-CAD: ${inputFormat.toUpperCase()} → ${normalizedOutputFormat.toUpperCase()}`;
         await convertCadToCad(inputPath, outputPath);
+        stepsCompleted.push(`FreeCAD CAD-to-CAD: ${inputFormat.toUpperCase()} → ${normalizedOutputFormat.toUpperCase()}`);
         log(`CAD-to-CAD conversion successful`, 'success');
         return {
           outputPath,
@@ -413,7 +452,9 @@ export async function convertFile(
     if ((normalizedOutputFormat as string) === 'dxf') {
       log(`STEP/IGES → DXF via FreeCAD...`);
       try {
+        currentStep = `FreeCAD: ${inputFormat.toUpperCase()} → DXF`;
         await convertCadToCad(inputPath, outputPath);
+        stepsCompleted.push(`FreeCAD: ${inputFormat.toUpperCase()} → DXF`);
         log(`STEP/IGES → DXF successful`, 'success');
         return {
           outputPath,
@@ -435,13 +476,17 @@ export async function convertFile(
       const tempDxfPath = path.join(inputDir, `temp_${Date.now()}.dxf`);
       try {
         // Step 1: STEP/IGES → DXF via FreeCAD
+        currentStep = `FreeCAD: ${inputFormat.toUpperCase()} → DXF`;
         log(`Step 1: ${inputFormat.toUpperCase()} → DXF via FreeCAD...`);
         await convertCadToCad(inputPath, tempDxfPath);
+        stepsCompleted.push(`FreeCAD: ${inputFormat.toUpperCase()} → DXF`);
         log(`Step 1 complete`, 'success');
         
         // Step 2: DXF → DWG via ODA
+        currentStep = 'ODA: DXF → DWG';
         log(`Step 2: DXF → DWG via ODA...`);
         const odaOutputPath = await odaConvert(tempDxfPath, 'DWG');
+        stepsCompleted.push('ODA: DXF → DWG');
         if (odaOutputPath !== outputPath) {
           await fs.move(odaOutputPath, outputPath, { overwrite: true });
         }
@@ -468,17 +513,21 @@ export async function convertFile(
     const tempStlPath = path.join(inputDir, `temp_${Date.now()}.stl`);
     try {
       // Step 1: Convert to STL via existing FreeCAD exporter
+      currentStep = `FreeCAD: ${inputFormat.toUpperCase()} → STL`;
       log(`Step 1: ${inputFormat.toUpperCase()} → STL via FreeCAD...`);
       const freecadResult = await convertWithFreecad(inputPath, 'stl');
       await fs.move(freecadResult.outputPath, tempStlPath, { overwrite: true });
+      stepsCompleted.push(`FreeCAD: ${inputFormat.toUpperCase()} → STL`);
       log(`Step 1 complete`, 'success');
       
       // Step 2: STL → final format
       if (normalizedOutputFormat === 'stl') {
         await fs.move(tempStlPath, outputPath, { overwrite: true });
       } else {
+        currentStep = `Fallback: STL → ${normalizedOutputFormat.toUpperCase()}`;
         log(`Step 2: STL → ${normalizedOutputFormat.toUpperCase()}...`);
         await convertWithFullFallback(tempStlPath, outputPath);
+        stepsCompleted.push(`Fallback: STL → ${normalizedOutputFormat.toUpperCase()}`);
         log(`Step 2 complete`, 'success');
       }
       
@@ -501,6 +550,7 @@ export async function convertFile(
   // 5b. Any format → STEP/IGES OUTPUT
   //     Skip IFC input (handled by Route 6a via IfcConvert)
   if ((isStepOutput || isIgesOutput) && !isIfcFormat(inputFormat)) {
+    currentRoute = `Any → ${normalizedOutputFormat.toUpperCase()} (Blender+FreeCAD)`;
     log(`Route: Any → ${normalizedOutputFormat.toUpperCase()}`);
     
     const tempStlPath = path.join(inputDir, `temp_${Date.now()}.stl`);
@@ -509,6 +559,7 @@ export async function convertFile(
       // Step 1: Convert to clean STL via Blender
       if ((inputFormat as string) === 'dwg' || (inputFormat as string) === 'dxf') {
         // DWG/DXF → OBJ via APS, then → STL
+        currentStep = `APS: ${inputFormat.toUpperCase()} → OBJ, then Blender → STL`;
         log(`Step 1: DWG/DXF → OBJ via APS, then → STL...`);
         if (!isApsAvailable()) {
           throw new ConversionError(
@@ -518,27 +569,34 @@ export async function convertFile(
         }
         const tempObjPath = path.join(inputDir, `temp_aps_${Date.now()}.obj`);
         await apsConvert(inputPath, tempObjPath, { outputFormat: 'obj' });
-        await blenderConvert(tempObjPath, tempStlPath);
+        await blenderConvert(tempObjPath, tempStlPath, { decimateTargetFaces: 10000 });
         await fs.remove(tempObjPath).catch(() => {});
+        stepsCompleted.push(`APS: ${inputFormat.toUpperCase()} → OBJ + Blender → STL (decimated)`);
         log(`Step 1 complete`, 'success');
       } else {
-        // Mesh format → STL via Blender (sanitizes mesh)
-        log(`Step 1: Blender → STL (sanitized)...`);
-        await blenderConvert(inputPath, tempStlPath);
+        // Mesh format → STL via Blender (sanitizes mesh + decimates for FreeCAD)
+        currentStep = `Blender: ${inputFormat.toUpperCase()} → STL (decimated)`;
+        log(`Step 1: Blender → STL (sanitized + decimated)...`);
+        await blenderConvert(inputPath, tempStlPath, { decimateTargetFaces: 10000 });
+        stepsCompleted.push(`Blender: ${inputFormat.toUpperCase()} → STL (decimated)`);
         log(`Step 1 complete`, 'success');
       }
       
       // Step 2: STL → STEP/IGES via FreeCAD
       if (isStepOutput) {
+        currentStep = 'FreeCAD: STL → STEP (solidification)';
         log(`Step 2: STL → STEP via FreeCAD (solidification)...`);
         await convertMeshToStep(tempStlPath, outputPath);
+        stepsCompleted.push('FreeCAD: STL → STEP (solidification)');
       } else {
         // For IGES: STL → STEP → IGES
+        currentStep = 'FreeCAD: STL → STEP → IGES';
         log(`Step 2: STL → STEP → IGES via FreeCAD...`);
         const tempStepPath = path.join(inputDir, `temp_step_${Date.now()}.step`);
         await convertMeshToStep(tempStlPath, tempStepPath);
         await convertCadToCad(tempStepPath, outputPath);
         await fs.remove(tempStepPath).catch(() => {});
+        stepsCompleted.push('FreeCAD: STL → STEP → IGES');
       }
       log(`Step 2 complete`, 'success');
       
@@ -566,6 +624,7 @@ export async function convertFile(
   
   // 6a. IFC INPUT → Any format (Use IfcConvert)
   if (isIfcInput) {
+    currentRoute = `IFC input → ${normalizedOutputFormat.toUpperCase()}`;
     log(`Route: IFC input → ${normalizedOutputFormat.toUpperCase()}`);
     
     // Check if IfcConvert is available
@@ -581,10 +640,12 @@ export async function convertFile(
     if (IFC_CONVERT_NATIVE_FORMATS.includes(normalizedOutputFormat)) {
       log(`IfcConvert direct: IFC → ${normalizedOutputFormat.toUpperCase()}...`);
       try {
+        currentStep = `IfcConvert: IFC → ${normalizedOutputFormat.toUpperCase()}`;
         await ifcConvert(inputPath, outputPath, {
           useElementNames: true,
           centerModel: true
         });
+        stepsCompleted.push(`IfcConvert: IFC → ${normalizedOutputFormat.toUpperCase()}`);
         log(`IfcConvert successful`, 'success');
         return {
           outputPath,
@@ -603,11 +664,13 @@ export async function convertFile(
 
     try {
       // Step 1: IFC → OBJ via IfcConvert
+      currentStep = 'IfcConvert: IFC → OBJ';
       log(`Step 1: IFC → OBJ via IfcConvert...`);
       await ifcConvert(inputPath, tempObjPath, {
         useElementNames: true,
         centerModel: true
       });
+      stepsCompleted.push('IfcConvert: IFC → OBJ');
       log(`Step 1 complete`, 'success');
 
       // Step 2: OBJ → target format
@@ -615,28 +678,36 @@ export async function convertFile(
       if (isStepFormat(normalizedOutputFormat) || isIgesFormat(normalizedOutputFormat)) {
         const tempStlPath = path.join(inputDir, `temp_stl_${Date.now()}.stl`);
         try {
-          log(`Step 2a: OBJ → STL via Blender...`);
-          await blenderConvert(tempObjPath, tempStlPath);
+          currentStep = 'Blender: OBJ → STL (decimated)';
+          log(`Step 2a: OBJ → STL via Blender (decimated)...`);
+          await blenderConvert(tempObjPath, tempStlPath, { decimateTargetFaces: 10000 });
+          stepsCompleted.push('Blender: OBJ → STL (decimated)');
           log(`Step 2a complete`, 'success');
 
           if (isStepFormat(normalizedOutputFormat)) {
+            currentStep = 'FreeCAD: STL → STEP (solidification)';
             log(`Step 2b: STL → STEP via FreeCAD (solidification)...`);
             await convertMeshToStep(tempStlPath, outputPath);
+            stepsCompleted.push('FreeCAD: STL → STEP (solidification)');
           } else {
             // IGES: STL → STEP → IGES
             const tempStepPath = path.join(inputDir, `temp_step_${Date.now()}.step`);
+            currentStep = 'FreeCAD: STL → STEP → IGES';
             log(`Step 2b: STL → STEP → IGES via FreeCAD...`);
             await convertMeshToStep(tempStlPath, tempStepPath);
             await convertCadToCad(tempStepPath, outputPath);
             await fs.remove(tempStepPath).catch(() => {});
+            stepsCompleted.push('FreeCAD: STL → STEP → IGES');
           }
           log(`Step 2 complete`, 'success');
         } finally {
           await fs.remove(tempStlPath).catch(() => {});
         }
       } else {
+        currentStep = `Fallback: OBJ → ${normalizedOutputFormat.toUpperCase()}`;
         log(`Step 2: OBJ → ${normalizedOutputFormat.toUpperCase()}...`);
         await convertWithFullFallback(tempObjPath, outputPath);
+        stepsCompleted.push(`Fallback: OBJ → ${normalizedOutputFormat.toUpperCase()}`);
         log(`Step 2 complete`, 'success');
       }
       
@@ -658,6 +729,7 @@ export async function convertFile(
   
   // 6b. Any format → IFC OUTPUT (Use mesh_to_ifc.py)
   if (isIfcOutput) {
+    currentRoute = `${inputFormat.toUpperCase()} → IFC`;
     log(`Route: ${inputFormat.toUpperCase()} → IFC`);
     
     const tempObjPath = path.join(inputDir, `temp_${Date.now()}.obj`);
@@ -668,8 +740,10 @@ export async function convertFile(
         // Already OBJ, use directly
         log(`Input is already OBJ, using directly...`);
         await fs.copy(inputPath, tempObjPath);
+        stepsCompleted.push('Copy OBJ input');
       } else if ((inputFormat as string) === 'dwg' || (inputFormat as string) === 'dxf') {
         // DWG/DXF → OBJ via APS
+        currentStep = `APS: ${inputFormat.toUpperCase()} → OBJ`;
         log(`Step 1: DWG/DXF → OBJ via APS...`);
         if (!isApsAvailable()) {
           throw new ConversionError(
@@ -678,17 +752,22 @@ export async function convertFile(
           );
         }
         await apsConvert(inputPath, tempObjPath, { outputFormat: 'obj' });
+        stepsCompleted.push(`APS: ${inputFormat.toUpperCase()} → OBJ`);
         log(`Step 1 complete`, 'success');
       } else {
         // Other formats → OBJ via Blender
+        currentStep = `Blender: ${inputFormat.toUpperCase()} → OBJ`;
         log(`Step 1: ${inputFormat.toUpperCase()} → OBJ via Blender...`);
         await blenderConvert(inputPath, tempObjPath);
+        stepsCompleted.push(`Blender: ${inputFormat.toUpperCase()} → OBJ`);
         log(`Step 1 complete`, 'success');
       }
       
       // Step 2: OBJ → IFC via mesh_to_ifc.py
+      currentStep = 'mesh_to_ifc: OBJ → IFC';
       log(`Step 2: OBJ → IFC via mesh_to_ifc.py...`);
       await meshToIfc(tempObjPath, outputPath);
+      stepsCompleted.push('mesh_to_ifc: OBJ → IFC');
       log(`Step 2 complete`, 'success');
       
       log(`Pipeline complete: ${inputFormat.toUpperCase()} → OBJ → IFC`, 'success');
@@ -712,9 +791,12 @@ export async function convertFile(
   // 7. SIMPLE MESH → SIMPLE MESH: Assimp → Blender → FreeCAD → APS
   // =====================================================
   if (isSimpleMesh(inputFormat) && isSimpleMesh(normalizedOutputFormat)) {
+    currentRoute = 'Simple mesh → Simple mesh (fallback chain)';
+    currentStep = `Fallback chain: ${inputFormat.toUpperCase()} → ${normalizedOutputFormat.toUpperCase()}`;
     log(`Route: Simple mesh → Simple mesh`);
     
     tool = await convertWithFullFallback(inputPath, outputPath);
+    stepsCompleted.push(`Fallback chain: ${inputFormat.toUpperCase()} → ${normalizedOutputFormat.toUpperCase()} (${tool})`);
     
     log(`Conversion complete using ${tool}`, 'success');
     return {
@@ -728,11 +810,14 @@ export async function convertFile(
   // 8. CAD FORMATS: Blender → FreeCAD → APS
   // =====================================================
   if (isCadFormat(inputFormat) || isCadFormat(normalizedOutputFormat)) {
+    currentRoute = 'CAD format conversion (Blender → FreeCAD → APS)';
     log(`Route: CAD format conversion`);
     log(`Trying Blender...`);
     
     try {
+      currentStep = `Blender: ${inputFormat.toUpperCase()} → ${normalizedOutputFormat.toUpperCase()}`;
       await blenderConvert(inputPath, outputPath);
+      stepsCompleted.push(`Blender: ${inputFormat.toUpperCase()} → ${normalizedOutputFormat.toUpperCase()}`);
       log(`Blender conversion successful`, 'success');
       return {
         outputPath,
@@ -748,16 +833,20 @@ export async function convertFile(
       if (canFreecadHandle(inputFormat)) {
         const tempStlPath = path.join(inputDir, `temp_${Date.now()}.stl`);
         try {
+          currentStep = `FreeCAD: ${inputFormat.toUpperCase()} → STL`;
           log(`Trying FreeCAD...`);
           const freecadResult = await convertWithFreecad(inputPath, 'stl');
           await fs.move(freecadResult.outputPath, tempStlPath, { overwrite: true });
+          stepsCompleted.push(`FreeCAD: ${inputFormat.toUpperCase()} → STL`);
           log(`FreeCAD conversion successful`, 'success');
           
           if (outFmt === 'stl') {
             await fs.move(tempStlPath, outputPath, { overwrite: true });
           } else {
+            currentStep = `Fallback: STL → ${outFmt.toUpperCase()}`;
             log(`Converting STL → ${outFmt.toUpperCase()}...`);
             await convertWithFullFallback(tempStlPath, outputPath);
+            stepsCompleted.push(`Fallback: STL → ${outFmt.toUpperCase()}`);
           }
           
           log(`Pipeline complete`, 'success');
@@ -840,15 +929,32 @@ export async function convertFile(
   // =====================================================
   // 9. FALLBACK - Try full chain for any other formats
   // =====================================================
+  currentRoute = 'Fallback chain';
+  currentStep = `Fallback chain: ${inputFormat.toUpperCase()} → ${normalizedOutputFormat.toUpperCase()}`;
   log(`Route: Fallback chain`);
   tool = await convertWithFullFallback(inputPath, outputPath);
   
   log(`Conversion complete using ${tool}`, 'success');
+  stepsCompleted.push(`Fallback chain: ${inputFormat.toUpperCase()} → ${normalizedOutputFormat.toUpperCase()} (${tool})`);
   return {
     outputPath,
     tool,
     duration: Date.now() - startTime
   };
+
+  } catch (err) {
+    // Log error to data/errorLogs file (only on error)
+    await logConversionError({
+      inputFormat,
+      outputFormat: normalizedOutputFormat,
+      fileName: inputFilename,
+      route: currentRoute || 'Unknown',
+      stepsCompleted,
+      failedStep: currentStep || 'Unknown step',
+      errorMessage: err instanceof Error ? err.message : String(err),
+    });
+    throw err;
+  }
 }
 
 /**

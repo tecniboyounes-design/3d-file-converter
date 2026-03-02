@@ -125,10 +125,12 @@ export async function batchRoutes(fastify: FastifyInstance) {
     }
 
     // Apply format overrides and validate
-    for (const file of files) {
-      const override = formatOverrides[file.id];
-      if (override && isSupportedOutputFormat(override)) {
-        file.outputFormat = override;
+    // Overrides are keyed by file index (processing order), not by ID
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      const override = formatOverrides[String(i)];
+      if (override && isSupportedOutputFormat(override.toLowerCase())) {
+        file.outputFormat = override.toLowerCase();
       } else {
         file.outputFormat = defaultFormat;
       }

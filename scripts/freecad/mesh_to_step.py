@@ -94,9 +94,13 @@ def repair_mesh(mesh_obj, aggressive=False):
     return is_solid_now
 
 
-def decimate_mesh(mesh_obj, target_faces=50000):
+def decimate_mesh(mesh_obj, target_faces=10000):
     """
     Decimate a mesh to reduce face count for memory-safe STEP conversion.
+    
+    Note: FreeCAD's makeShapeFromMesh() creates an OpenCASCADE B-Rep face for
+    each mesh triangle, which is very memory-intensive (~100KB+ per face).
+    50k faces can require 5+ GB RAM. Keep target low to prevent OOM.
 
     Args:
         mesh_obj: FreeCAD Mesh object
@@ -136,9 +140,12 @@ def mesh_to_shape(mesh_obj, tolerance=0.001):
     face_count = mesh_obj.CountFacets
 
     # For large meshes, use a larger tolerance to reduce memory usage
-    if face_count > 50000:
-        tolerance = max(tolerance, 0.1)
+    if face_count > 20000:
+        tolerance = max(tolerance, 0.5)
         print(f"[FreeCAD] Large mesh ({face_count} faces), using tolerance={tolerance}")
+    elif face_count > 10000:
+        tolerance = max(tolerance, 0.1)
+        print(f"[FreeCAD] Medium mesh ({face_count} faces), using tolerance={tolerance}")
 
     print(f"[FreeCAD] Converting mesh to shape (tolerance={tolerance})...")
 
@@ -268,7 +275,7 @@ def main():
         repair_mesh(mesh_obj, aggressive=False)
 
         # 2.5. Decimate large meshes to prevent OOM during shape creation
-        mesh_obj = decimate_mesh(mesh_obj, target_faces=50000)
+        mesh_obj = decimate_mesh(mesh_obj, target_faces=10000)
 
         # 3. Convert mesh to shape
         shape = mesh_to_shape(mesh_obj, tolerance=0.001)

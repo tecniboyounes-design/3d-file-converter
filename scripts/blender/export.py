@@ -302,17 +302,32 @@ if obj_hierarchy_json and output_file_format in ('glb', 'gltf'):
 decimate_target = os.environ.get("DECIMATE_TARGET_FACES", "")
 if decimate_target:
   target = int(decimate_target)
-  total_faces = sum(len(obj.data.polygons) for obj in bpy.data.objects if obj.type == 'MESH')
+  mesh_objects = [obj for obj in bpy.data.objects if obj.type == 'MESH' and len(obj.data.polygons) > 0]
+  total_faces = sum(len(obj.data.polygons) for obj in mesh_objects)
   if total_faces > target:
-    ratio = target / total_faces
-    print(f"[Blender] Decimating: {total_faces} → ~{target} faces (ratio={ratio:.3f})")
-    for obj in bpy.data.objects:
-      if obj.type == 'MESH' and len(obj.data.polygons) > 0:
-        mod = obj.modifiers.new("Decimate", 'DECIMATE')
-        mod.ratio = ratio
-        bpy.context.view_layer.objects.active = obj
-        bpy.ops.object.modifier_apply(modifier="Decimate")
-    new_total = sum(len(obj.data.polygons) for obj in bpy.data.objects if obj.type == 'MESH')
+    print(f"[Blender] Decimating: {total_faces} → ~{target} faces across {len(mesh_objects)} objects")
+    
+    # Join all meshes into one object first for uniform decimation
+    # This avoids crashing on small objects with aggressive ratios
+    bpy.ops.object.select_all(action='DESELECT')
+    for obj in mesh_objects:
+      obj.select_set(True)
+    bpy.context.view_layer.objects.active = mesh_objects[0]
+    
+    if len(mesh_objects) > 1:
+      bpy.ops.object.join()
+      print(f"[Blender] Joined {len(mesh_objects)} objects into one mesh")
+    
+    combined = bpy.context.view_layer.objects.active
+    combined_faces = len(combined.data.polygons)
+    ratio = max(target / combined_faces, 0.01)
+    print(f"[Blender] Combined mesh: {combined_faces} faces, applying ratio={ratio:.4f}")
+    
+    mod = combined.modifiers.new("Decimate", 'DECIMATE')
+    mod.ratio = ratio
+    bpy.ops.object.modifier_apply(modifier="Decimate")
+    
+    new_total = len(combined.data.polygons)
     print(f"[Blender] After decimation: {new_total} faces")
   else:
     print(f"[Blender] Mesh is small enough ({total_faces} faces), skipping decimation")

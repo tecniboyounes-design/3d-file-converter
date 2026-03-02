@@ -56,6 +56,12 @@ function App() {
     f => f.inputFormat === f.outputFormat && f.status === "pending"
   );
 
+  // Check if any file has an error (blocks new conversions until removed)
+  const hasErrorFiles = files.some(f => f.status === "error");
+
+  // Collect all uploaded input extensions (for global format filtering)
+  const uploadedExtensions = [...new Set(files.map(f => f.inputFormat))];
+
   // Check if all files are completed
   const allCompleted = files.length > 0 && files.every(
     f => f.status === "completed" || f.status === "error"
@@ -63,6 +69,16 @@ function App() {
 
   // Count completed files
   const completedCount = files.filter(f => f.status === "completed").length;
+
+  // Auto-switch global format if current selection matches an uploaded extension
+  useEffect(() => {
+    if (files.length > 0 && uploadedExtensions.includes(globalFormat)) {
+      const available = SUPPORTED_FORMATS.filter(fmt => !uploadedExtensions.includes(fmt));
+      if (available.length > 0) {
+        applyGlobalFormat(available[0]);
+      }
+    }
+  }, [uploadedExtensions.join(","), files.length]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Auto-dismiss toast
   useEffect(() => {
@@ -143,11 +159,20 @@ function App() {
         continue;
       }
 
-      // Determine output format (avoid same as input)
+      // Collect all extensions that will be in the queue after this batch
+      const allInputExtensions = [
+        ...new Set([
+          ...files.map(f => f.inputFormat),
+          ...newFiles.map(f => f.inputFormat),
+          inputFormat,
+        ]),
+      ];
+
+      // Determine output format (avoid same as input and any uploaded extension)
       let outputFormat = globalFormat;
-      if (outputFormat === inputFormat) {
-        const idx = SUPPORTED_FORMATS.indexOf(outputFormat);
-        outputFormat = SUPPORTED_FORMATS[(idx + 1) % SUPPORTED_FORMATS.length];
+      if (allInputExtensions.includes(outputFormat)) {
+        const available = SUPPORTED_FORMATS.filter(fmt => !allInputExtensions.includes(fmt));
+        outputFormat = available.length > 0 ? available[0] : SUPPORTED_FORMATS[0];
       }
 
       newFiles.push({
@@ -223,19 +248,21 @@ function App() {
 
   // Start batch conversion
   const handleConvertAll = async () => {
-    if (files.length === 0 || hasFormatConflict || isProcessing) return;
+    if (files.length === 0 || hasFormatConflict || isProcessing || hasErrorFiles) return;
 
     setIsProcessing(true);
 
     const formData = new FormData();
     formData.append("defaultFormat", globalFormat);
 
-    // Build format overrides
+    // Build format overrides keyed by file index (matches server processing order)
     const formatOverrides = {};
+    let fileIndex = 0;
     files.forEach(f => {
       if (f.status === "pending") {
         formData.append("file", f.file);
-        formatOverrides[f.id] = f.outputFormat;
+        formatOverrides[fileIndex] = f.outputFormat;
+        fileIndex++;
       }
     });
     formData.append("formats", JSON.stringify(formatOverrides));
@@ -394,7 +421,7 @@ function App() {
                         disabled={f.status !== "pending" || isProcessing}
                         className={`select-mini ${hasConflict ? "error" : ""}`}
                       >
-                        {SUPPORTED_FORMATS.map((fmt) => (
+                        {SUPPORTED_FORMATS.filter(fmt => fmt !== f.inputFormat).map((fmt) => (
                           <option key={fmt} value={fmt}>
                             {fmt.toUpperCase()}
                           </option>
@@ -450,6 +477,16 @@ function App() {
                           ×
                         </button>
                       )}
+
+                      {f.status === "error" && (
+                        <button 
+                          className="btn-icon remove"
+                          onClick={() => removeFile(f.id)}
+                          title="Remove failed file"
+                        >
+                          ×
+                        </button>
+                      )}
                     </div>
                   </div>
                 );
@@ -459,6 +496,12 @@ function App() {
             {hasFormatConflict && (
               <p className="conflict-warning">
                 ⚠ Some files have the same input and output format. Please change the output format.
+              </p>
+            )}
+
+            {hasErrorFiles && !isProcessing && (
+              <p className="conflict-warning">
+                ⚠ Remove failed files before starting a new conversion.
               </p>
             )}
           </div>
@@ -477,25 +520,19 @@ function App() {
               disabled={isProcessing}
             >
               <optgroup label="Mesh Formats">
-                <option value="glb">GLB</option>
-                <option value="gltf">glTF</option>
-                <option value="obj">OBJ</option>
-                <option value="stl">STL</option>
-                <option value="fbx">FBX</option>
-                <option value="ply">PLY</option>
-                <option value="dae">DAE</option>
-                <option value="3ds">3DS</option>
+                {["glb","gltf","obj","stl","fbx","ply","dae","3ds"].filter(fmt => !uploadedExtensions.includes(fmt)).map(fmt => (
+                  <option key={fmt} value={fmt}>{fmt === "gltf" ? "glTF" : fmt.toUpperCase()}</option>
+                ))}
               </optgroup>
               <optgroup label="CAD Formats">
-                <option value="dxf">DXF</option>
-                <option value="dwg">DWG</option>
-                <option value="step">STEP</option>
-                <option value="stp">STP</option>
-                <option value="iges">IGES</option>
-                <option value="igs">IGS</option>
+                {["dxf","dwg","step","stp","iges","igs"].filter(fmt => !uploadedExtensions.includes(fmt)).map(fmt => (
+                  <option key={fmt} value={fmt}>{fmt.toUpperCase()}</option>
+                ))}
               </optgroup>
               <optgroup label="BIM Formats">
-                <option value="ifc">IFC</option>
+                {["ifc"].filter(fmt => !uploadedExtensions.includes(fmt)).map(fmt => (
+                  <option key={fmt} value={fmt}>{fmt.toUpperCase()}</option>
+                ))}
               </optgroup>
             </select>
           </div>
@@ -504,7 +541,7 @@ function App() {
             <button
               className="btn"
               onClick={handleConvertAll}
-              disabled={files.length === 0 || hasFormatConflict || isProcessing}
+              disabled={files.length === 0 || hasFormatConflict || isProcessing || hasErrorFiles}
             >
               {isProcessing && <span className="loader"></span>}
               {isProcessing 

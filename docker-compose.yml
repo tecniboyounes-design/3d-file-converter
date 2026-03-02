@@ -26,6 +26,10 @@ services:
       - APS_BUCKET_KEY=tecnibo-room-planner-server-side-20250657
     volumes:
       - uploads:/usr/src/app/data/uploads
+    deploy:
+      resources:
+        limits:
+          memory: 4g
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:3001/health"]
       interval: 30s
