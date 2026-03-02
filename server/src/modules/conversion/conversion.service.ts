@@ -34,10 +34,11 @@
 import path from 'path';
 import fs from 'fs-extra';
 import { readFileSync } from 'fs';
-import { 
-  blenderConvert, 
+import {
+  blenderConvert,
   assimpConvert,
   odaConvert,
+  dwgToDxf,
   convertWithFreecad,
   canFreecadHandle,
   canFreecadExportCad,
@@ -237,77 +238,115 @@ export async function convertFile(
   }
 
   // =====================================================
-  // 3. DWG/DXF INPUT → Any mesh format (Use Autodesk APS)
+  // 3. DWG/DXF INPUT → Any format (APS with ODA fallback)
   // =====================================================
   const inputIsDwgDxf = isDwgFormat(inputFormat) || inputFormat === 'dxf';
-  
+
   if (inputIsDwgDxf) {
-    log(`Route: DWG/DXF input → mesh output`);
-    
-    // Check if APS is available
-    if (!isApsAvailable()) {
-      log(`APS not configured (APS_CLIENT_ID/APS_CLIENT_SECRET missing)`, 'error');
-      throw new ConversionError(
-        'DWG/DXF conversion requires Autodesk APS',
-        'DWG/DXF files require Autodesk cloud conversion. ' +
-        'Configure APS_CLIENT_ID and APS_CLIENT_SECRET environment variables to enable this feature.'
-      );
-    }
-    
-    // Cast to string for flexible comparison
+    log(`Route: DWG/DXF input → ${normalizedOutputFormat.toUpperCase()} output`);
+
     const outFmt = normalizedOutputFormat as string;
-    
-    // Direct to OBJ/STL
-    if (outFmt === 'obj' || outFmt === 'stl') {
-      log(`Trying APS direct (${inputFormat.toUpperCase()} → ${outFmt.toUpperCase()})...`);
-      try {
-        await apsConvert(inputPath, outputPath, { 
-          outputFormat: outFmt as 'obj' | 'stl' 
-        });
-        log(`APS conversion successful`, 'success');
-        return {
-          outputPath,
-          tool: 'aps',
-          duration: Date.now() - startTime
-        };
-      } catch (apsErr) {
-        log(`APS conversion failed: ${apsErr instanceof Error ? apsErr.message : String(apsErr)}`, 'error');
-        throw new ConversionError(
-          `Failed to convert ${inputFormat.toUpperCase()} to ${normalizedOutputFormat.toUpperCase()}`,
-          `Autodesk APS cloud conversion failed. Error: ${apsErr instanceof Error ? apsErr.message : String(apsErr)}`
-        );
+    let apsError: string | null = null;
+
+    // --- Try APS first (best for ACIS solids) ---
+    if (isApsAvailable()) {
+      // Direct to OBJ/STL via APS
+      if (outFmt === 'obj' || outFmt === 'stl') {
+        try {
+          log(`Trying APS direct (${inputFormat.toUpperCase()} → ${outFmt.toUpperCase()})...`);
+          await apsConvert(inputPath, outputPath, {
+            outputFormat: outFmt as 'obj' | 'stl'
+          });
+          log(`APS conversion successful`, 'success');
+          return {
+            outputPath,
+            tool: 'aps',
+            duration: Date.now() - startTime
+          };
+        } catch (err) {
+          apsError = err instanceof Error ? err.message : String(err);
+          log(`APS failed: ${apsError}`, 'warn');
+        }
+      } else {
+        // Other formats: DWG/DXF → OBJ → target format via APS
+        const tempObjPath = path.join(inputDir, `temp_aps_${Date.now()}.obj`);
+        try {
+          log(`Pipeline: APS (${inputFormat.toUpperCase()} → OBJ) → ${outFmt.toUpperCase()}`);
+          await apsConvert(inputPath, tempObjPath, { outputFormat: 'obj' });
+          log(`APS → OBJ successful`, 'success');
+
+          log(`Converting OBJ → ${outFmt.toUpperCase()}...`);
+          await convertWithFullFallback(tempObjPath, outputPath);
+          log(`Pipeline complete via APS`, 'success');
+          return {
+            outputPath,
+            tool: 'pipeline',
+            duration: Date.now() - startTime
+          };
+        } catch (err) {
+          apsError = err instanceof Error ? err.message : String(err);
+          log(`APS pipeline failed: ${apsError}`, 'warn');
+        } finally {
+          await fs.remove(tempObjPath).catch(() => {});
+        }
       }
+    } else {
+      apsError = 'APS not configured (missing credentials)';
+      log(`${apsError}`, 'warn');
     }
-    
-    // Other mesh formats: DWG/DXF → OBJ → target format
-    log(`Pipeline: ${inputFormat.toUpperCase()} → OBJ → ${normalizedOutputFormat.toUpperCase()}`);
-    const tempObjPath = path.join(inputDir, `temp_${Date.now()}.obj`);
-    
+
+    // --- Fallback: ODA (DWG→DXF) + Blender/FreeCAD pipeline ---
+    log(`Falling back to ODA + local tools pipeline...`);
+    const tempDxfPath = path.join(inputDir, `temp_oda_${Date.now()}.dxf`);
+
     try {
-      // Step 1: Convert to OBJ via APS
-      log(`Step 1: Trying APS (${inputFormat.toUpperCase()} → OBJ)...`);
-      await apsConvert(inputPath, tempObjPath, { outputFormat: 'obj' });
-      log(`Step 1: APS conversion successful`, 'success');
-      
-      // Step 2: Convert OBJ to final format
-      log(`Step 2: Converting OBJ → ${normalizedOutputFormat.toUpperCase()}...`);
-      await convertWithFullFallback(tempObjPath, outputPath);
-      log(`Step 2: Conversion successful`, 'success');
-      
-      log(`Pipeline complete`, 'success');
+      // Step 1: DWG → DXF via ODA (skip if input is already DXF)
+      let dxfPath = inputPath;
+      if (isDwgFormat(inputFormat)) {
+        log(`Step 1: ODA (DWG → DXF)...`);
+        const odaResult = await dwgToDxf(inputPath);
+        await fs.move(odaResult, tempDxfPath, { overwrite: true });
+        dxfPath = tempDxfPath;
+        log(`Step 1: ODA conversion successful`, 'success');
+      }
+
+      // Step 2: Route DXF → target format
+      if (isStepFormat(outFmt) || isIgesFormat(outFmt)) {
+        // DXF → STL (Blender with decimation) → STP/IGES (FreeCAD solidification)
+        const tempStlPath = path.join(inputDir, `temp_stl_${Date.now()}.stl`);
+        try {
+          log(`Step 2: Blender (DXF → decimated STL)...`);
+          await blenderConvert(dxfPath, tempStlPath, { decimateTargetFaces: 20000 });
+          log(`Step 2: Blender successful`, 'success');
+
+          log(`Step 3: FreeCAD (STL → ${outFmt.toUpperCase()})...`);
+          await convertMeshToStep(tempStlPath, outputPath);
+          log(`Step 3: FreeCAD solidification successful`, 'success');
+        } finally {
+          await fs.remove(tempStlPath).catch(() => {});
+        }
+      } else {
+        // DXF → target mesh format via Blender/Assimp fallback chain
+        log(`Step 2: DXF → ${outFmt.toUpperCase()} via fallback chain...`);
+        await convertWithFullFallback(dxfPath, outputPath);
+        log(`Step 2: Conversion successful`, 'success');
+      }
+
+      log(`Pipeline complete via ODA fallback`, 'success');
       return {
         outputPath,
-        tool: 'pipeline', // APS + Blender/Assimp
+        tool: 'pipeline',
         duration: Date.now() - startTime
       };
     } catch (err) {
-      log(`Pipeline failed: ${err instanceof Error ? err.message : String(err)}`, 'error');
+      const odaError = err instanceof Error ? err.message : String(err);
+      log(`ODA fallback pipeline failed: ${odaError}`, 'error');
       throw new ConversionError(
         `Failed to convert ${inputFormat.toUpperCase()} to ${normalizedOutputFormat.toUpperCase()}`,
-        `Error: ${err instanceof Error ? err.message : String(err)}`
+        `APS failed: ${apsError}. ODA fallback also failed: ${odaError}`
       );
     } finally {
-      await fs.remove(tempObjPath).catch(() => {});
+      await fs.remove(tempDxfPath).catch(() => {});
     }
   }
 

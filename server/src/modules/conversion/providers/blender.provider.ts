@@ -23,11 +23,12 @@ const blenderLimit = pLimit(config.maxConcurrentBlender);
 
 interface BlenderConversionOptions {
   timeout?: number;
+  decimateTargetFaces?: number;
 }
 
 /**
  * Convert a 3D file using Blender
- * 
+ *
  * @param inputPath - Absolute path to input file
  * @param outputPath - Absolute path for output file
  * @param options - Conversion options
@@ -37,10 +38,10 @@ export async function blenderConvert(
   outputPath: string,
   options: BlenderConversionOptions = {}
 ): Promise<string> {
-  const { timeout = config.conversionTimeout } = options;
+  const { timeout = config.conversionTimeout, decimateTargetFaces } = options;
 
   // Use p-limit to queue heavy conversions
-  return blenderLimit(() => executeBlender(inputPath, outputPath, timeout));
+  return blenderLimit(() => executeBlender(inputPath, outputPath, timeout, decimateTargetFaces));
 }
 
 /**
@@ -101,7 +102,8 @@ async function checkOutputValidity(outputPath: string, format: string): Promise<
 async function executeBlender(
   inputPath: string,
   outputPath: string,
-  timeout: number
+  timeout: number,
+  decimateTargetFaces?: number
 ): Promise<string> {
   const inputFormat = path.extname(inputPath).slice(1).toLowerCase();
   const outputFormat = path.extname(outputPath).slice(1).toLowerCase();
@@ -131,6 +133,8 @@ async function executeBlender(
       OUTPUT_FILE_FORMAT: outputFormat,
       // Pass hierarchy JSON for GLB export (empty string if not available)
       OBJ_HIERARCHY_JSON: hierarchyJson,
+      // Optional mesh decimation for STEP pipeline
+      ...(decimateTargetFaces ? { DECIMATE_TARGET_FACES: String(decimateTargetFaces) } : {}),
     };
 
     // ✅ SECURE: Using spawn with arguments array (no shell injection possible)

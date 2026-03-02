@@ -94,29 +94,63 @@ def repair_mesh(mesh_obj, aggressive=False):
     return is_solid_now
 
 
+def decimate_mesh(mesh_obj, target_faces=50000):
+    """
+    Decimate a mesh to reduce face count for memory-safe STEP conversion.
+
+    Args:
+        mesh_obj: FreeCAD Mesh object
+        target_faces: Target number of faces after decimation
+
+    Returns:
+        Mesh.Mesh: Decimated mesh (or original if already small enough)
+    """
+    face_count = mesh_obj.CountFacets
+    if face_count <= target_faces:
+        return mesh_obj
+
+    ratio = target_faces / face_count
+    print(f"[FreeCAD] Decimating mesh: {face_count} → ~{target_faces} faces (ratio={ratio:.3f})...")
+
+    try:
+        mesh_obj.decimate(tolerance=0.0, reduction=ratio)
+        print(f"[FreeCAD] Decimated: {mesh_obj.CountFacets} faces")
+    except Exception as e:
+        print(f"[FreeCAD] Decimation failed: {e}, using original mesh")
+
+    return mesh_obj
+
+
 def mesh_to_shape(mesh_obj, tolerance=0.001):
     """
     Convert a mesh to a Part.Shape using FreeCAD's OpenCASCADE kernel.
-    
+
     Args:
         mesh_obj: FreeCAD Mesh object
         tolerance: Tolerance for shape creation (smaller = more accurate)
                    Default 0.001mm for high precision
-        
+
     Returns:
         Part.Shape: The converted shape
     """
+    face_count = mesh_obj.CountFacets
+
+    # For large meshes, use a larger tolerance to reduce memory usage
+    if face_count > 50000:
+        tolerance = max(tolerance, 0.1)
+        print(f"[FreeCAD] Large mesh ({face_count} faces), using tolerance={tolerance}")
+
     print(f"[FreeCAD] Converting mesh to shape (tolerance={tolerance})...")
-    
+
     # Get mesh topology (vertices and faces)
     topology = mesh_obj.Topology
-    
-    # Create shape from mesh topology with high precision
+
+    # Create shape from mesh topology
     shape = Part.Shape()
     shape.makeShapeFromMesh(topology, tolerance)
-    
+
     print(f"[FreeCAD] Shape created: {len(shape.Faces)} faces, {len(shape.Edges)} edges")
-    
+
     return shape
 
 
@@ -232,8 +266,11 @@ def main():
         
         # 2. Gentle repair only (preserve geometry)
         repair_mesh(mesh_obj, aggressive=False)
-        
-        # 3. Convert mesh to shape with high precision (0.001mm tolerance)
+
+        # 2.5. Decimate large meshes to prevent OOM during shape creation
+        mesh_obj = decimate_mesh(mesh_obj, target_faces=50000)
+
+        # 3. Convert mesh to shape
         shape = mesh_to_shape(mesh_obj, tolerance=0.001)
         
         # 4. Skip face merging to preserve all geometry

@@ -297,6 +297,27 @@ if obj_hierarchy_json and output_file_format in ('glb', 'gltf'):
     print(f"[Blender] Warning: Failed to apply hierarchy: {e}")
 
 #--------------------------------------------------------------------
+# Optional Mesh Decimation (for STEP pipeline - reduces FreeCAD memory)
+#--------------------------------------------------------------------
+decimate_target = os.environ.get("DECIMATE_TARGET_FACES", "")
+if decimate_target:
+  target = int(decimate_target)
+  total_faces = sum(len(obj.data.polygons) for obj in bpy.data.objects if obj.type == 'MESH')
+  if total_faces > target:
+    ratio = target / total_faces
+    print(f"[Blender] Decimating: {total_faces} → ~{target} faces (ratio={ratio:.3f})")
+    for obj in bpy.data.objects:
+      if obj.type == 'MESH' and len(obj.data.polygons) > 0:
+        mod = obj.modifiers.new("Decimate", 'DECIMATE')
+        mod.ratio = ratio
+        bpy.context.view_layer.objects.active = obj
+        bpy.ops.object.modifier_apply(modifier="Decimate")
+    new_total = sum(len(obj.data.polygons) for obj in bpy.data.objects if obj.type == 'MESH')
+    print(f"[Blender] After decimation: {new_total} faces")
+  else:
+    print(f"[Blender] Mesh is small enough ({total_faces} faces), skipping decimation")
+
+#--------------------------------------------------------------------
 # Export 3D File
 #--------------------------------------------------------------------
 

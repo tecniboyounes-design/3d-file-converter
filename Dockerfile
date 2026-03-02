@@ -119,7 +119,7 @@ RUN ln -sf /usr/lib/x86_64-linux-gnu/libxcb-util.so.1 /usr/lib/x86_64-linux-gnu/
 
 # Download and install ODA File Converter DEB package
 # Version 26.12 from official ODA website: https://www.opendesign.com/guestfiles/oda_file_converter
-ARG ODA_VERSION=26.12
+ARG ODA_VERSION=27.1
 RUN set -eux; \
     curl -fsSL -o /tmp/oda.deb \
       "https://www.opendesign.com/guestfiles/get?filename=ODAFileConverter_QT6_lnxX64_8.3dll_${ODA_VERSION}.deb"; \
@@ -170,16 +170,21 @@ RUN xvfb-run -a python3 -c "import sys; sys.path.insert(0, '/usr/lib/freecad/lib
 # INSTALL IFCOPENSHELL (for IFC format support)
 # ============================================================
 # Copy IfcConvert binary from official IfcOpenShell image (multi-stage build)
-COPY --from=ifcopenshell-source /usr/bin/IfcConvert /usr/local/bin/IfcConvert
+COPY --from=ifcopenshell-source /usr/bin/IfcConvert /usr/local/bin/IfcConvert.bin
 
-# Copy required shared libraries from IfcOpenShell image
-# These are OpenCASCADE, HDF5, Boost, TBB, ICU libraries that IfcConvert was built against
-COPY --from=ifcopenshell-source /lib/x86_64-linux-gnu/libTK*.so.7 /lib/x86_64-linux-gnu/
-COPY --from=ifcopenshell-source /lib/x86_64-linux-gnu/libhdf5_serial*.so* /lib/x86_64-linux-gnu/
-COPY --from=ifcopenshell-source /lib/x86_64-linux-gnu/libboost_program_options.so* /lib/x86_64-linux-gnu/
-COPY --from=ifcopenshell-source /lib/x86_64-linux-gnu/libboost_regex.so* /lib/x86_64-linux-gnu/
-COPY --from=ifcopenshell-source /lib/x86_64-linux-gnu/libtbb*.so* /lib/x86_64-linux-gnu/
-COPY --from=ifcopenshell-source /lib/x86_64-linux-gnu/libicu*.so* /lib/x86_64-linux-gnu/
+# Copy required shared libraries to an ISOLATED directory to avoid
+# conflicts with system OpenCASCADE libs used by FreeCAD
+RUN mkdir -p /opt/ifcopenshell/lib
+COPY --from=ifcopenshell-source /lib/x86_64-linux-gnu/libTK*.so.7 /opt/ifcopenshell/lib/
+COPY --from=ifcopenshell-source /lib/x86_64-linux-gnu/libhdf5_serial*.so* /opt/ifcopenshell/lib/
+COPY --from=ifcopenshell-source /lib/x86_64-linux-gnu/libboost_program_options.so* /opt/ifcopenshell/lib/
+COPY --from=ifcopenshell-source /lib/x86_64-linux-gnu/libboost_regex.so* /opt/ifcopenshell/lib/
+COPY --from=ifcopenshell-source /lib/x86_64-linux-gnu/libtbb*.so* /opt/ifcopenshell/lib/
+COPY --from=ifcopenshell-source /lib/x86_64-linux-gnu/libicu*.so* /opt/ifcopenshell/lib/
+
+# Create wrapper script for IfcConvert that uses isolated libraries
+RUN printf '#!/bin/bash\nLD_LIBRARY_PATH=/opt/ifcopenshell/lib:$LD_LIBRARY_PATH exec /usr/local/bin/IfcConvert.bin "$@"\n' \
+    > /usr/local/bin/IfcConvert && chmod +x /usr/local/bin/IfcConvert
 
 # Install IfcOpenShell Python library and remaining runtime dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
