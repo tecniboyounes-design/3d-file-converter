@@ -199,8 +199,10 @@ export async function convertFile(
 
   // =====================================================
   // 2. Any format → DWG (via DXF intermediate using Blender + ODA)
+  //    Skip STEP/IGES (handled by Route 5a) and IFC (handled by Route 6a)
   // =====================================================
-  if (normalizedOutputFormat === 'dwg' && inputFormat !== 'dxf') {
+  if (normalizedOutputFormat === 'dwg' && inputFormat !== 'dxf'
+      && !isBrepCadFormat(inputFormat) && !isIfcFormat(inputFormat)) {
     log(`Route: Any → DWG (via DXF intermediate)`);
     const tempDxfPath = path.join(inputDir, `temp_${Date.now()}.dxf`);
     
@@ -352,8 +354,10 @@ export async function convertFile(
 
   // =====================================================
   // 4. Any format → DXF (Use Blender)
+  //    Skip STEP/IGES (handled by Route 5a) and IFC (handled by Route 6a)
   // =====================================================
-  if (normalizedOutputFormat === 'dxf') {
+  if (normalizedOutputFormat === 'dxf'
+      && !isBrepCadFormat(inputFormat) && !isIfcFormat(inputFormat)) {
     log(`Route: Any → DXF`);
     log(`Trying Blender...`);
     try {
@@ -495,7 +499,8 @@ export async function convertFile(
   }
   
   // 5b. Any format → STEP/IGES OUTPUT
-  if (isStepOutput || isIgesOutput) {
+  //     Skip IFC input (handled by Route 6a via IfcConvert)
+  if ((isStepOutput || isIgesOutput) && !isIfcFormat(inputFormat)) {
     log(`Route: Any → ${normalizedOutputFormat.toUpperCase()}`);
     
     const tempStlPath = path.join(inputDir, `temp_${Date.now()}.stl`);
@@ -587,18 +592,15 @@ export async function convertFile(
           duration: Date.now() - startTime
         };
       } catch (err) {
-        log(`IfcConvert failed: ${err instanceof Error ? err.message : String(err)}`, 'error');
-        throw new ConversionError(
-          `Failed to convert IFC to ${normalizedOutputFormat.toUpperCase()}`,
-          `IfcConvert failed. Error: ${err instanceof Error ? err.message : String(err)}`
-        );
+        log(`IfcConvert direct failed: ${err instanceof Error ? err.message : String(err)}, falling back to OBJ pipeline...`, 'warn');
+        // Fall through to OBJ pipeline below
       }
     }
-    
-    // For formats not natively supported by IfcConvert, go IFC → OBJ → target
+
+    // For formats not natively supported by IfcConvert (or when direct fails), go IFC → OBJ → target
     log(`Pipeline: IFC → OBJ → ${normalizedOutputFormat.toUpperCase()}`);
     const tempObjPath = path.join(inputDir, `temp_${Date.now()}.obj`);
-    
+
     try {
       // Step 1: IFC → OBJ via IfcConvert
       log(`Step 1: IFC → OBJ via IfcConvert...`);
@@ -607,11 +609,36 @@ export async function convertFile(
         centerModel: true
       });
       log(`Step 1 complete`, 'success');
-      
+
       // Step 2: OBJ → target format
-      log(`Step 2: OBJ → ${normalizedOutputFormat.toUpperCase()}...`);
-      await convertWithFullFallback(tempObjPath, outputPath);
-      log(`Step 2 complete`, 'success');
+      // STEP/IGES need specialized FreeCAD solidification pipeline
+      if (isStepFormat(normalizedOutputFormat) || isIgesFormat(normalizedOutputFormat)) {
+        const tempStlPath = path.join(inputDir, `temp_stl_${Date.now()}.stl`);
+        try {
+          log(`Step 2a: OBJ → STL via Blender...`);
+          await blenderConvert(tempObjPath, tempStlPath);
+          log(`Step 2a complete`, 'success');
+
+          if (isStepFormat(normalizedOutputFormat)) {
+            log(`Step 2b: STL → STEP via FreeCAD (solidification)...`);
+            await convertMeshToStep(tempStlPath, outputPath);
+          } else {
+            // IGES: STL → STEP → IGES
+            const tempStepPath = path.join(inputDir, `temp_step_${Date.now()}.step`);
+            log(`Step 2b: STL → STEP → IGES via FreeCAD...`);
+            await convertMeshToStep(tempStlPath, tempStepPath);
+            await convertCadToCad(tempStepPath, outputPath);
+            await fs.remove(tempStepPath).catch(() => {});
+          }
+          log(`Step 2 complete`, 'success');
+        } finally {
+          await fs.remove(tempStlPath).catch(() => {});
+        }
+      } else {
+        log(`Step 2: OBJ → ${normalizedOutputFormat.toUpperCase()}...`);
+        await convertWithFullFallback(tempObjPath, outputPath);
+        log(`Step 2 complete`, 'success');
+      }
       
       return {
         outputPath,
@@ -868,8 +895,9 @@ async function convertWithFullFallback(
   }
 
   // 1. Try Assimp first (fast, good for simple meshes)
-  // Skip Assimp if we need hierarchy preservation
-  if (isSimpleMesh(inputFormat) && isSimpleMesh(outputFormat) && !preferBlenderForHierarchy) {
+  // Skip Assimp if we need hierarchy preservation or FBX output (Assimp FBX output is unreliable for reimport)
+  if (isSimpleMesh(inputFormat) && isSimpleMesh(outputFormat) && !preferBlenderForHierarchy
+      && outputFormat !== 'fbx') {
     try {
       log(`Trying Assimp...`);
       await assimpConvert(inputPath, outputPath);

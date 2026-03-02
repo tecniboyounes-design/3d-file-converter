@@ -59,24 +59,50 @@ def load_cad_file(file_path, doc):
     elif ext in (".step", ".stp"):
         Part.insert(file_path, doc.Name)
     elif ext in (".iges", ".igs"):
+        # Try Part.insert first, fall back to Part.open and direct shape read
         Part.insert(file_path, doc.Name)
     elif ext == ".brep":
         Part.insert(file_path, doc.Name)
     else:
         raise ValueError(f"Unsupported input format: {ext}")
-    
+
     # Get active document (may have changed)
     doc = FreeCAD.ActiveDocument
     if doc is None:
         raise RuntimeError("No document created after import")
-    
+
     # Collect all shapes
     shapes = []
     for obj in doc.Objects:
         if hasattr(obj, "Shape") and obj.Shape:
             if not obj.Shape.isNull():
                 shapes.append(obj.Shape)
-    
+
+    # For IGES: if Part.insert found no shapes, try reading the shape directly
+    if not shapes and ext in (".iges", ".igs"):
+        print(f"[FreeCAD] Part.insert found no shapes, trying direct Part.Shape.read...")
+        try:
+            shape = Part.Shape()
+            shape.read(file_path)
+            if not shape.isNull():
+                shapes.append(shape)
+                print(f"[FreeCAD] Direct shape read succeeded")
+        except Exception as e:
+            print(f"[FreeCAD] Direct shape read failed: {e}")
+
+        # If still no shapes, try Part.open (creates new document)
+        if not shapes:
+            print(f"[FreeCAD] Trying Part.open...")
+            try:
+                Part.open(file_path)
+                doc = FreeCAD.ActiveDocument
+                for obj in doc.Objects:
+                    if hasattr(obj, "Shape") and obj.Shape:
+                        if not obj.Shape.isNull():
+                            shapes.append(obj.Shape)
+            except Exception as e:
+                print(f"[FreeCAD] Part.open failed: {e}")
+
     if not shapes:
         raise RuntimeError("No shapes found in document")
     
@@ -129,8 +155,9 @@ def export_cad_file(shape, file_path):
         Part.export([shape], file_path)
         
     elif ext in (".iges", ".igs"):
-        # IGES export
-        Part.export([shape], file_path)
+        # IGES export - use shape.exportIges() for proper geometry output
+        # (Part.export produces empty 402 entities for some shape types)
+        shape.exportIges(file_path)
         
     elif ext == ".dxf":
         # DXF export - need to use importDXF module

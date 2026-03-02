@@ -324,7 +324,14 @@ if decimate_target:
 print(f"[Blender] Exporting to {output_file_format}...")
 
 if output_file_format == "fbx":
-  bpy.ops.export_scene.fbx(filepath=output_file_path, axis_forward="-Z", axis_up="Y")
+  bpy.ops.export_scene.fbx(
+    filepath=output_file_path,
+    axis_forward="-Z",
+    axis_up="Y",
+    object_types={'MESH', 'EMPTY'},
+    add_leaf_bones=False,
+    bake_anim=False,
+  )
 elif output_file_format == "obj":
   # Blender 4.0 uses wm.obj_export instead of export_scene.obj
   bpy.ops.wm.obj_export(filepath=output_file_path)

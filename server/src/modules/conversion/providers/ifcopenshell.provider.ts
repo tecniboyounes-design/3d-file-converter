@@ -115,8 +115,16 @@ async function executeIfcConvert(
     // Weld vertices for cleaner mesh
     args.push('--weld-vertices');
     
+    // Normalize output extension: IfcConvert only recognizes .stp (not .step) and .igs (not .iges)
+    let actualOutputPath = outputPath;
+    if (outputFormat === 'step') {
+      actualOutputPath = outputPath.replace(/\.step$/i, '.stp');
+    } else if (outputFormat === 'iges') {
+      actualOutputPath = outputPath.replace(/\.iges$/i, '.igs');
+    }
+
     // Input and output files
-    args.push(inputPath, outputPath);
+    args.push(inputPath, actualOutputPath);
     
     console.log(`[IfcConvert] Command: IfcConvert ${args.join(' ')}`);
     
@@ -143,9 +151,14 @@ async function executeIfcConvert(
     
     process.on('close', async (code) => {
       clearTimeout(timer);
-      
+
       if (killed) return;
-      
+
+      // If we used a normalized path, rename back to the expected output path
+      if (actualOutputPath !== outputPath && code === 0 && await fs.pathExists(actualOutputPath)) {
+        await fs.move(actualOutputPath, outputPath, { overwrite: true });
+      }
+
       if (code === 0 && await fs.pathExists(outputPath)) {
         const stats = await fs.stat(outputPath);
         console.log(`[IfcConvert] Success: ${stats.size} bytes`);
