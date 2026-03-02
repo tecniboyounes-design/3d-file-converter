@@ -57,7 +57,11 @@ export async function odaConvert(
 
   const inputDir = path.dirname(inputFilePath);
   const inputFileName = path.basename(inputFilePath);
-  const outputFileName = inputFileName.replace(inputExt, `.${outputFormat.toLowerCase()}`);
+  // Use regex with case-insensitive flag to handle uppercase extensions like .DWG
+  const outputFileName = inputFileName.replace(
+    new RegExp(inputExt.replace('.', '\\.') + '$', 'i'),
+    `.${outputFormat.toLowerCase()}`
+  );
 
   // Create temporary directories (ODA requires directories, not files)
   const timestamp = Date.now();

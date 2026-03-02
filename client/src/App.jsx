@@ -75,10 +75,23 @@ function App() {
     if (files.length > 0 && uploadedExtensions.includes(globalFormat)) {
       const available = SUPPORTED_FORMATS.filter(fmt => !uploadedExtensions.includes(fmt));
       if (available.length > 0) {
-        applyGlobalFormat(available[0]);
+        setGlobalFormat(available[0]);
       }
     }
   }, [uploadedExtensions.join(","), files.length]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Sync global format when all pending files share the same output format
+  useEffect(() => {
+    const pendingFiles = files.filter(f => f.status === "pending");
+    if (pendingFiles.length === 0) return;
+    const formats = new Set(pendingFiles.map(f => f.outputFormat));
+    if (formats.size === 1) {
+      const common = [...formats][0];
+      if (common !== globalFormat) {
+        setGlobalFormat(common);
+      }
+    }
+  }, [files]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Auto-dismiss toast
   useEffect(() => {
@@ -218,9 +231,12 @@ function App() {
 
   // Update single file's output format
   const updateFileFormat = (fileId, newFormat) => {
-    setFiles(prev => prev.map(f => 
-      f.id === fileId ? { ...f, outputFormat: newFormat } : f
-    ));
+    setFiles(prev => {
+      const updated = prev.map(f =>
+        f.id === fileId ? { ...f, outputFormat: newFormat } : f
+      );
+      return updated;
+    });
   };
 
   // Remove file from queue
