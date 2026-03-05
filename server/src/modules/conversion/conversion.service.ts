@@ -50,7 +50,8 @@ import {
   ifcConvert,
   meshToIfc,
   isIfcConvertAvailable,
-  IFC_CONVERT_NATIVE_FORMATS
+  IFC_CONVERT_NATIVE_FORMATS,
+  acisToStep
 } from './providers';
 import { 
   isSimpleMesh, 
@@ -341,22 +342,40 @@ export async function convertFile(
 
       // Step 2: Route DXF → target format
       if (isStepFormat(outFmt) || isIgesFormat(outFmt)) {
-        // DXF → STL (Blender with decimation) → STP/IGES (FreeCAD solidification)
-        const tempStlPath = path.join(inputDir, `temp_stl_${Date.now()}.stl`);
-        try {
-          currentStep = 'Blender: DXF → STL (decimated)';
-          log(`Step 2: Blender (DXF → decimated STL)...`);
-          await blenderConvert(dxfPath, tempStlPath, { decimateTargetFaces: 20000 });
-          stepsCompleted.push('Blender: DXF → STL (decimated)');
-          log(`Step 2: Blender successful`, 'success');
+        // Strategy A: InventorLoader ACIS extraction (DXF → STEP with full B-Rep fidelity)
+        let acisSuccess = false;
+        if (isStepFormat(outFmt)) {
+          try {
+            currentStep = 'InventorLoader: DXF → STEP (ACIS 3DSOLID)';
+            log(`Step 2a: InventorLoader ACIS extraction (DXF → STEP)...`);
+            await acisToStep(dxfPath, outputPath);
+            stepsCompleted.push('InventorLoader: DXF → STEP (ACIS)');
+            log(`Step 2a: InventorLoader ACIS → STEP successful`, 'success');
+            acisSuccess = true;
+          } catch (acisErr) {
+            const msg = acisErr instanceof Error ? acisErr.message : String(acisErr);
+            log(`Step 2a: InventorLoader failed (${msg}), trying Blender fallback...`, 'warn');
+          }
+        }
 
-          currentStep = `FreeCAD: STL → ${outFmt.toUpperCase()}`;
-          log(`Step 3: FreeCAD (STL → ${outFmt.toUpperCase()})...`);
-          await convertMeshToStep(tempStlPath, outputPath);
-          stepsCompleted.push(`FreeCAD: STL → ${outFmt.toUpperCase()}`);
-          log(`Step 3: FreeCAD solidification successful`, 'success');
-        } finally {
-          await fs.remove(tempStlPath).catch(() => {});
+        // Strategy B: Blender DXF → STL → FreeCAD solidification (fallback)
+        if (!acisSuccess) {
+          const tempStlPath = path.join(inputDir, `temp_stl_${Date.now()}.stl`);
+          try {
+            currentStep = 'Blender: DXF → STL (decimated)';
+            log(`Step 2b: Blender (DXF → decimated STL)...`);
+            await blenderConvert(dxfPath, tempStlPath, { decimateTargetFaces: 20000 });
+            stepsCompleted.push('Blender: DXF → STL (decimated)');
+            log(`Step 2b: Blender successful`, 'success');
+
+            currentStep = `FreeCAD: STL → ${outFmt.toUpperCase()}`;
+            log(`Step 3: FreeCAD (STL → ${outFmt.toUpperCase()})...`);
+            await convertMeshToStep(tempStlPath, outputPath);
+            stepsCompleted.push(`FreeCAD: STL → ${outFmt.toUpperCase()}`);
+            log(`Step 3: FreeCAD solidification successful`, 'success');
+          } finally {
+            await fs.remove(tempStlPath).catch(() => {});
+          }
         }
       } else {
         // DXF → target mesh format via Blender/Assimp fallback chain

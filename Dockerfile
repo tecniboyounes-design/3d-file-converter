@@ -190,7 +190,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgmp10 \
     libtbb12 \
     libtbbmalloc2 \
-    && pip3 install --break-system-packages ifcopenshell \
+    && pip3 install --break-system-packages ifcopenshell ezdxf olefile \
     && ldconfig \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
