@@ -330,7 +330,6 @@ function App() {
       assimp: { label: "⚡ Assimp", color: "#10b981" },
       blender: { label: "🎨 Blender", color: "#3b82f6" },
       oda: { label: "📐 ODA", color: "#8b5cf6" },
-      aps: { label: "☁️ APS", color: "#ec4899" },
       pipeline: { label: "🔗 Pipeline", color: "#f59e0b" },
     };
     return badges[tool] || { label: tool, color: "#6b7280" };

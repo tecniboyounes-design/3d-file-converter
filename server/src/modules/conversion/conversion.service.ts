@@ -7,7 +7,7 @@
  * 
  * 2. Any format → DWG: Convert to DXF first (Blender), then DXF → DWG (ODA)
  * 
- * 3. DWG/DXF INPUT → Any format: Use Autodesk APS (handles ACIS 3D solids)
+ * 3. DWG/DXF INPUT → Any format: ODA (DWG→DXF) + InventorLoader/Blender/FreeCAD
  * 
  * 4. Any format → DXF: Use Blender directly
  * 
@@ -22,9 +22,9 @@
  *    - IFC → Mesh/CAD: IfcConvert direct (OBJ/GLB/DAE/STEP/IGES)
  *    - Any → IFC: Blender → OBJ → mesh_to_ifc.py (multi-object preservation)
  * 
- * 7. Simple Mesh → Simple Mesh: Assimp → Blender → FreeCAD → APS (fallback chain)
- * 
- * 8. CAD formats: Blender → FreeCAD → APS (fallback chain)
+ * 7. Simple Mesh → Simple Mesh: Assimp → Blender → FreeCAD (fallback chain)
+ *
+ * 8. CAD formats: Blender → FreeCAD (fallback chain)
  * 
  * 9. Fallback: Try full chain for any other formats
  * 
@@ -44,9 +44,6 @@ import {
   canFreecadExportCad,
   convertMeshToStep,
   convertCadToCad,
-  apsConvert,
-  isApsAvailable,
-  getHierarchyForObj,
   ifcConvert,
   meshToIfc,
   isIfcConvertAvailable,
@@ -77,7 +74,7 @@ import {
 
 interface ConversionResult {
   outputPath: string;
-  tool: 'assimp' | 'blender' | 'oda' | 'pipeline' | 'aps' | 'ifcopenshell';
+  tool: 'assimp' | 'blender' | 'oda' | 'pipeline' | 'ifcopenshell';
   duration: number;
 }
 
@@ -222,12 +219,24 @@ export async function convertFile(
     const tempDxfPath = path.join(inputDir, `temp_${Date.now()}.dxf`);
     
     try {
-      // Step 1: Convert to DXF via Blender
+      // Step 1: Convert to DXF via Blender (fallback: Assimp → OBJ → Blender → DXF)
       currentStep = `Blender: ${inputFormat.toUpperCase()} → DXF`;
       log(`Step 1: Trying Blender (${inputFormat.toUpperCase()} → DXF)...`);
-      await blenderConvert(inputPath, tempDxfPath);
-      stepsCompleted.push(`Blender: ${inputFormat.toUpperCase()} → DXF`);
-      log(`Step 1: Blender conversion successful`, 'success');
+      try {
+        await blenderConvert(inputPath, tempDxfPath);
+      } catch (blenderErr) {
+        // Blender failed (e.g., can't import 3DS), try via intermediate OBJ
+        log(`Blender failed, trying via intermediate OBJ...`, 'warn');
+        const tempObjPath = path.join(inputDir, `temp_obj_${Date.now()}.obj`);
+        try {
+          await assimpConvert(inputPath, tempObjPath);
+          await blenderConvert(tempObjPath, tempDxfPath);
+        } finally {
+          await fs.remove(tempObjPath).catch(() => {});
+        }
+      }
+      stepsCompleted.push(`${inputFormat.toUpperCase()} → DXF`);
+      log(`Step 1: Conversion to DXF successful`, 'success');
       
       // Step 2: Convert DXF to DWG via ODA
       currentStep = 'ODA: DXF → DWG';
@@ -259,7 +268,7 @@ export async function convertFile(
   }
 
   // =====================================================
-  // 3. DWG/DXF INPUT → Any format (APS with ODA fallback)
+  // 3. DWG/DXF INPUT → Any format (ODA + InventorLoader/Blender/FreeCAD)
   // =====================================================
   const inputIsDwgDxf = isDwgFormat(inputFormat) || inputFormat === 'dxf';
 
@@ -268,63 +277,6 @@ export async function convertFile(
     log(`Route: DWG/DXF input → ${normalizedOutputFormat.toUpperCase()} output`);
 
     const outFmt = normalizedOutputFormat as string;
-    let apsError: string | null = null;
-
-    // --- Try APS first (best for ACIS solids) ---
-    if (isApsAvailable()) {
-      // Direct to OBJ/STL via APS
-      if (outFmt === 'obj' || outFmt === 'stl') {
-        try {
-          currentStep = `APS: ${inputFormat.toUpperCase()} → ${outFmt.toUpperCase()}`;
-          log(`Trying APS direct (${inputFormat.toUpperCase()} → ${outFmt.toUpperCase()})...`);
-          await apsConvert(inputPath, outputPath, {
-            outputFormat: outFmt as 'obj' | 'stl'
-          });
-          stepsCompleted.push(`APS: ${inputFormat.toUpperCase()} → ${outFmt.toUpperCase()}`);
-          log(`APS conversion successful`, 'success');
-          return {
-            outputPath,
-            tool: 'aps',
-            duration: Date.now() - startTime
-          };
-        } catch (err) {
-          apsError = err instanceof Error ? err.message : String(err);
-          log(`APS failed: ${apsError}`, 'warn');
-        }
-      } else {
-        // Other formats: DWG/DXF → OBJ → target format via APS
-        const tempObjPath = path.join(inputDir, `temp_aps_${Date.now()}.obj`);
-        try {
-          currentStep = `APS: ${inputFormat.toUpperCase()} → OBJ`;
-          log(`Pipeline: APS (${inputFormat.toUpperCase()} → OBJ) → ${outFmt.toUpperCase()}`);
-          await apsConvert(inputPath, tempObjPath, { outputFormat: 'obj' });
-          stepsCompleted.push(`APS: ${inputFormat.toUpperCase()} → OBJ`);
-          log(`APS → OBJ successful`, 'success');
-
-          currentStep = `Fallback: OBJ → ${outFmt.toUpperCase()}`;
-          log(`Converting OBJ → ${outFmt.toUpperCase()}...`);
-          await convertWithFullFallback(tempObjPath, outputPath);
-          stepsCompleted.push(`Fallback: OBJ → ${outFmt.toUpperCase()}`);
-          log(`Pipeline complete via APS`, 'success');
-          return {
-            outputPath,
-            tool: 'pipeline',
-            duration: Date.now() - startTime
-          };
-        } catch (err) {
-          apsError = err instanceof Error ? err.message : String(err);
-          log(`APS pipeline failed: ${apsError}`, 'warn');
-        } finally {
-          await fs.remove(tempObjPath).catch(() => {});
-        }
-      }
-    } else {
-      apsError = 'APS not configured (missing credentials)';
-      log(`${apsError}`, 'warn');
-    }
-
-    // --- Fallback: ODA (DWG→DXF) + Blender/FreeCAD pipeline ---
-    log(`Falling back to ODA + local tools pipeline...`);
     const tempDxfPath = path.join(inputDir, `temp_oda_${Date.now()}.dxf`);
 
     try {
@@ -341,7 +293,25 @@ export async function convertFile(
       }
 
       // Step 2: Route DXF → target format
-      if (isStepFormat(outFmt) || isIgesFormat(outFmt)) {
+      if (isIfcFormat(outFmt)) {
+        // DXF → OBJ → IFC pipeline
+        const tempObjPath = path.join(inputDir, `temp_obj_${Date.now()}.obj`);
+        try {
+          currentStep = 'Blender: DXF → OBJ';
+          log(`Step 2: DXF → OBJ via Blender...`);
+          await blenderConvert(dxfPath, tempObjPath);
+          stepsCompleted.push('Blender: DXF → OBJ');
+          log(`Step 2 complete`, 'success');
+
+          currentStep = 'mesh_to_ifc: OBJ → IFC';
+          log(`Step 3: OBJ → IFC via mesh_to_ifc...`);
+          await meshToIfc(tempObjPath, outputPath);
+          stepsCompleted.push('mesh_to_ifc: OBJ → IFC');
+          log(`Step 3 complete`, 'success');
+        } finally {
+          await fs.remove(tempObjPath).catch(() => {});
+        }
+      } else if (isStepFormat(outFmt) || isIgesFormat(outFmt)) {
         // Strategy A: InventorLoader ACIS extraction (DXF → STEP with full B-Rep fidelity)
         let acisSuccess = false;
         if (isStepFormat(outFmt)) {
@@ -386,18 +356,18 @@ export async function convertFile(
         log(`Step 2: Conversion successful`, 'success');
       }
 
-      log(`Pipeline complete via ODA fallback`, 'success');
+      log(`Pipeline complete`, 'success');
       return {
         outputPath,
         tool: 'pipeline',
         duration: Date.now() - startTime
       };
     } catch (err) {
-      const odaError = err instanceof Error ? err.message : String(err);
-      log(`ODA fallback pipeline failed: ${odaError}`, 'error');
+      const error = err instanceof Error ? err.message : String(err);
+      log(`Pipeline failed: ${error}`, 'error');
       throw new ConversionError(
         `Failed to convert ${inputFormat.toUpperCase()} to ${normalizedOutputFormat.toUpperCase()}`,
-        `APS failed: ${apsError}. ODA fallback also failed: ${odaError}`
+        `ODA pipeline failed: ${error}`
       );
     } finally {
       await fs.remove(tempDxfPath).catch(() => {});
@@ -424,7 +394,26 @@ export async function convertFile(
         duration: Date.now() - startTime
       };
     } catch (blenderErr) {
-      log(`Blender failed: ${blenderErr instanceof Error ? blenderErr.message : String(blenderErr)}`, 'error');
+      log(`Blender direct failed, trying via intermediate OBJ...`, 'warn');
+      // Blender failed (e.g., can't import 3DS), try via Assimp → OBJ → Blender → DXF
+      if (isSimpleMesh(inputFormat)) {
+        const tempObjPath = path.join(inputDir, `temp_obj_${Date.now()}.obj`);
+        try {
+          await assimpConvert(inputPath, tempObjPath);
+          await blenderConvert(tempObjPath, outputPath);
+          stepsCompleted.push(`Assimp: ${inputFormat.toUpperCase()} → OBJ, Blender: OBJ → DXF`);
+          log(`Intermediate OBJ conversion successful`, 'success');
+          return {
+            outputPath,
+            tool: 'pipeline',
+            duration: Date.now() - startTime
+          };
+        } catch (fallbackErr) {
+          // Both direct and intermediate failed
+        } finally {
+          await fs.remove(tempObjPath).catch(() => {});
+        }
+      }
       throw new ConversionError(
         `Failed to convert ${inputFormat.toUpperCase()} to DXF`,
         `Blender could not export to DXF. Error: ${blenderErr instanceof Error ? blenderErr.message : String(blenderErr)}`
@@ -527,6 +516,48 @@ export async function convertFile(
       }
     }
     
+    // STEP/IGES → IFC (FreeCAD → STL → OBJ → mesh_to_ifc)
+    if (isIfcFormat(normalizedOutputFormat)) {
+      log(`STEP/IGES → IFC via FreeCAD + mesh_to_ifc...`);
+      const tempStlPath = path.join(inputDir, `temp_stl_${Date.now()}.stl`);
+      const tempObjPath = path.join(inputDir, `temp_obj_${Date.now()}.obj`);
+      try {
+        currentStep = `FreeCAD: ${inputFormat.toUpperCase()} → STL`;
+        log(`Step 1: ${inputFormat.toUpperCase()} → STL via FreeCAD...`);
+        const freecadResult = await convertWithFreecad(inputPath, 'stl');
+        await fs.move(freecadResult.outputPath, tempStlPath, { overwrite: true });
+        stepsCompleted.push(`FreeCAD: ${inputFormat.toUpperCase()} → STL`);
+        log(`Step 1 complete`, 'success');
+
+        currentStep = 'Blender: STL → OBJ';
+        log(`Step 2: STL → OBJ via Blender...`);
+        await blenderConvert(tempStlPath, tempObjPath);
+        stepsCompleted.push('Blender: STL → OBJ');
+        log(`Step 2 complete`, 'success');
+
+        currentStep = 'mesh_to_ifc: OBJ → IFC';
+        log(`Step 3: OBJ → IFC via mesh_to_ifc...`);
+        await meshToIfc(tempObjPath, outputPath);
+        stepsCompleted.push('mesh_to_ifc: OBJ → IFC');
+        log(`Step 3 complete`, 'success');
+
+        return {
+          outputPath,
+          tool: 'pipeline',
+          duration: Date.now() - startTime
+        };
+      } catch (err) {
+        log(`STEP/IGES → IFC failed: ${err instanceof Error ? err.message : String(err)}`, 'error');
+        throw new ConversionError(
+          `Failed to convert ${inputFormat.toUpperCase()} to IFC`,
+          `Error: ${err instanceof Error ? err.message : String(err)}`
+        );
+      } finally {
+        await fs.remove(tempStlPath).catch(() => {});
+        await fs.remove(tempObjPath).catch(() => {});
+      }
+    }
+
     // STEP/IGES → Mesh formats (FreeCAD → STL → Blender/Assimp)
     log(`STEP/IGES → mesh format via FreeCAD...`);
     const tempStlPath = path.join(inputDir, `temp_${Date.now()}.stl`);
@@ -575,31 +606,29 @@ export async function convertFile(
     const tempStlPath = path.join(inputDir, `temp_${Date.now()}.stl`);
     
     try {
-      // Step 1: Convert to clean STL via Blender
-      if ((inputFormat as string) === 'dwg' || (inputFormat as string) === 'dxf') {
-        // DWG/DXF → OBJ via APS, then → STL
-        currentStep = `APS: ${inputFormat.toUpperCase()} → OBJ, then Blender → STL`;
-        log(`Step 1: DWG/DXF → OBJ via APS, then → STL...`);
-        if (!isApsAvailable()) {
-          throw new ConversionError(
-            'DWG/DXF to STEP conversion requires Autodesk APS',
-            'Configure APS_CLIENT_ID and APS_CLIENT_SECRET environment variables.'
-          );
-        }
-        const tempObjPath = path.join(inputDir, `temp_aps_${Date.now()}.obj`);
-        await apsConvert(inputPath, tempObjPath, { outputFormat: 'obj' });
-        await blenderConvert(tempObjPath, tempStlPath, { decimateTargetFaces: 10000 });
-        await fs.remove(tempObjPath).catch(() => {});
-        stepsCompleted.push(`APS: ${inputFormat.toUpperCase()} → OBJ + Blender → STL (decimated)`);
-        log(`Step 1 complete`, 'success');
-      } else {
-        // Mesh format → STL via Blender (sanitizes mesh + decimates for FreeCAD)
-        currentStep = `Blender: ${inputFormat.toUpperCase()} → STL (decimated)`;
-        log(`Step 1: Blender → STL (sanitized + decimated)...`);
+      // Step 1: Convert to clean STL via Blender (sanitizes mesh + decimates for FreeCAD)
+      // Note: DWG/DXF input is handled by Route 3 before reaching here
+      currentStep = `Blender: ${inputFormat.toUpperCase()} → STL (decimated)`;
+      log(`Step 1: Blender → STL (sanitized + decimated)...`);
+      try {
         await blenderConvert(inputPath, tempStlPath, { decimateTargetFaces: 10000 });
-        stepsCompleted.push(`Blender: ${inputFormat.toUpperCase()} → STL (decimated)`);
-        log(`Step 1 complete`, 'success');
+      } catch (blenderErr) {
+        // Blender failed (e.g., can't import 3DS), try via Assimp intermediate OBJ
+        if (isSimpleMesh(inputFormat)) {
+          log(`Blender failed, trying via intermediate OBJ...`, 'warn');
+          const tempObjPath = path.join(inputDir, `temp_obj_${Date.now()}.obj`);
+          try {
+            await assimpConvert(inputPath, tempObjPath);
+            await blenderConvert(tempObjPath, tempStlPath, { decimateTargetFaces: 10000 });
+          } finally {
+            await fs.remove(tempObjPath).catch(() => {});
+          }
+        } else {
+          throw blenderErr;
+        }
       }
+      stepsCompleted.push(`${inputFormat.toUpperCase()} → STL (decimated)`);
+      log(`Step 1 complete`, 'success');
       
       // Step 2: STL → STEP/IGES via FreeCAD
       if (isStepOutput) {
@@ -693,8 +722,29 @@ export async function convertFile(
       log(`Step 1 complete`, 'success');
 
       // Step 2: OBJ → target format
+      // DWG needs OBJ → DXF → DWG pipeline (Blender + ODA)
+      if (normalizedOutputFormat === 'dwg') {
+        const tempDxfPath = path.join(inputDir, `temp_dxf_${Date.now()}.dxf`);
+        try {
+          currentStep = 'Blender: OBJ → DXF';
+          log(`Step 2a: OBJ → DXF via Blender...`);
+          await blenderConvert(tempObjPath, tempDxfPath);
+          stepsCompleted.push('Blender: OBJ → DXF');
+          log(`Step 2a complete`, 'success');
+
+          currentStep = 'ODA: DXF → DWG';
+          log(`Step 2b: DXF → DWG via ODA...`);
+          const odaOutputPath = await odaConvert(tempDxfPath, 'DWG');
+          stepsCompleted.push('ODA: DXF → DWG');
+          if (odaOutputPath !== outputPath) {
+            await fs.move(odaOutputPath, outputPath, { overwrite: true });
+          }
+          log(`Step 2b complete`, 'success');
+        } finally {
+          await fs.remove(tempDxfPath).catch(() => {});
+        }
+      } else if (isStepFormat(normalizedOutputFormat) || isIgesFormat(normalizedOutputFormat)) {
       // STEP/IGES need specialized FreeCAD solidification pipeline
-      if (isStepFormat(normalizedOutputFormat) || isIgesFormat(normalizedOutputFormat)) {
         const tempStlPath = path.join(inputDir, `temp_stl_${Date.now()}.stl`);
         try {
           currentStep = 'Blender: OBJ → STL (decimated)';
@@ -760,25 +810,22 @@ export async function convertFile(
         log(`Input is already OBJ, using directly...`);
         await fs.copy(inputPath, tempObjPath);
         stepsCompleted.push('Copy OBJ input');
-      } else if ((inputFormat as string) === 'dwg' || (inputFormat as string) === 'dxf') {
-        // DWG/DXF → OBJ via APS
-        currentStep = `APS: ${inputFormat.toUpperCase()} → OBJ`;
-        log(`Step 1: DWG/DXF → OBJ via APS...`);
-        if (!isApsAvailable()) {
-          throw new ConversionError(
-            'DWG/DXF to IFC conversion requires Autodesk APS',
-            'Configure APS_CLIENT_ID and APS_CLIENT_SECRET environment variables.'
-          );
-        }
-        await apsConvert(inputPath, tempObjPath, { outputFormat: 'obj' });
-        stepsCompleted.push(`APS: ${inputFormat.toUpperCase()} → OBJ`);
-        log(`Step 1 complete`, 'success');
       } else {
-        // Other formats → OBJ via Blender
+        // Other formats → OBJ via Blender (fallback: Assimp for mesh formats)
         currentStep = `Blender: ${inputFormat.toUpperCase()} → OBJ`;
         log(`Step 1: ${inputFormat.toUpperCase()} → OBJ via Blender...`);
-        await blenderConvert(inputPath, tempObjPath);
-        stepsCompleted.push(`Blender: ${inputFormat.toUpperCase()} → OBJ`);
+        try {
+          await blenderConvert(inputPath, tempObjPath);
+        } catch (blenderErr) {
+          // Blender failed (e.g., can't import 3DS), try Assimp
+          if (isSimpleMesh(inputFormat)) {
+            log(`Blender failed, trying Assimp...`, 'warn');
+            await assimpConvert(inputPath, tempObjPath);
+          } else {
+            throw blenderErr;
+          }
+        }
+        stepsCompleted.push(`${inputFormat.toUpperCase()} → OBJ`);
         log(`Step 1 complete`, 'success');
       }
       
@@ -807,7 +854,7 @@ export async function convertFile(
   }
 
   // =====================================================
-  // 7. SIMPLE MESH → SIMPLE MESH: Assimp → Blender → FreeCAD → APS
+  // 7. SIMPLE MESH → SIMPLE MESH: Assimp → Blender → FreeCAD
   // =====================================================
   if (isSimpleMesh(inputFormat) && isSimpleMesh(normalizedOutputFormat)) {
     currentRoute = 'Simple mesh → Simple mesh (fallback chain)';
@@ -826,10 +873,10 @@ export async function convertFile(
   }
 
   // =====================================================
-  // 8. CAD FORMATS: Blender → FreeCAD → APS
+  // 8. CAD FORMATS: Blender → FreeCAD
   // =====================================================
   if (isCadFormat(inputFormat) || isCadFormat(normalizedOutputFormat)) {
-    currentRoute = 'CAD format conversion (Blender → FreeCAD → APS)';
+    currentRoute = 'CAD format conversion (Blender → FreeCAD)';
     log(`Route: CAD format conversion`);
     log(`Trying Blender...`);
     
@@ -875,69 +922,12 @@ export async function convertFile(
             duration: Date.now() - startTime
           };
         } catch (freecadErr) {
-          log(`FreeCAD failed, trying APS as last resort...`, 'warn');
-          
-          // Try APS as ultimate fallback
-          if (isApsAvailable()) {
-            try {
-              log(`Trying APS...`);
-              const tempObjPath = path.join(inputDir, `temp_aps_${Date.now()}.obj`);
-              await apsConvert(inputPath, tempObjPath, { outputFormat: 'obj' });
-              log(`APS conversion successful`, 'success');
-              
-              if (outFmt === 'obj') {
-                await fs.move(tempObjPath, outputPath, { overwrite: true });
-              } else {
-                log(`Converting OBJ → ${outFmt.toUpperCase()}...`);
-                await convertWithFullFallback(tempObjPath, outputPath);
-                await fs.remove(tempObjPath).catch(() => {});
-              }
-              
-              log(`Pipeline complete`, 'success');
-              return {
-                outputPath,
-                tool: 'aps',
-                duration: Date.now() - startTime
-              };
-            } catch (apsErr) {
-              log(`APS also failed`, 'error');
-            }
-          }
-          
           throw new ConversionError(
             `Failed to convert ${inputFormat.toUpperCase()} to ${normalizedOutputFormat.toUpperCase()}`,
-            'All conversion methods failed (Blender, FreeCAD, APS).'
+            'All conversion methods failed (Blender, FreeCAD).'
           );
         } finally {
           await fs.remove(tempStlPath).catch(() => {});
-        }
-      }
-      
-      // FreeCAD can't handle this format, try APS directly
-      if (isApsAvailable()) {
-        log(`FreeCAD cannot handle ${inputFormat}, trying APS directly...`);
-        try {
-          log(`Trying APS...`);
-          const tempObjPath = path.join(inputDir, `temp_aps_${Date.now()}.obj`);
-          await apsConvert(inputPath, tempObjPath, { outputFormat: 'obj' });
-          log(`APS conversion successful`, 'success');
-          
-          if (outFmt === 'obj') {
-            await fs.move(tempObjPath, outputPath, { overwrite: true });
-          } else {
-            log(`Converting OBJ → ${outFmt.toUpperCase()}...`);
-            await convertWithFullFallback(tempObjPath, outputPath);
-            await fs.remove(tempObjPath).catch(() => {});
-          }
-          
-          log(`Pipeline complete`, 'success');
-          return {
-            outputPath,
-            tool: 'aps',
-            duration: Date.now() - startTime
-          };
-        } catch (apsErr) {
-          log(`APS also failed`, 'error');
         }
       }
       
@@ -977,15 +967,10 @@ export async function convertFile(
 }
 
 /**
- * Full fallback chain: Assimp → Blender → FreeCAD → APS
+ * Full fallback chain: Assimp → Blender → FreeCAD
  * Tries each converter in order until one succeeds
- * 
- * HIERARCHY PRESERVATION:
- * When converting OBJ files from APS that have hierarchy data,
- * we skip Assimp and go directly to Blender so parent-child
- * relationships can be reconstructed in GLB/GLTF output.
- * 
- * Also detects OBJ files with colon-notation groups (e.g., "g Obj.195:1")
+ *
+ * Detects OBJ files with colon-notation groups (e.g., "g Obj.195:1")
  * which indicate parent-child relationships that Blender can preserve.
  */
 async function convertWithFullFallback(
@@ -998,31 +983,23 @@ async function convertWithFullFallback(
 
   log(`Fallback chain: ${inputFormat.toUpperCase()} → ${outputFormat.toUpperCase()}`);
 
-  // Check if we have APS hierarchy data for this OBJ file
-  // If so, we MUST use Blender to preserve parent-child relationships in GLB/GLTF
-  const hasApsHierarchyData = inputFormat === 'obj' && 
-                           (outputFormat === 'glb' || outputFormat === 'gltf') &&
-                           getHierarchyForObj(inputPath) !== undefined;
-  
-  // Also check if OBJ file has colon-notation groups (e.g., "g Obj.195:1")
+  // Check if OBJ file has colon-notation groups (e.g., "g Obj.195:1")
   // These indicate parent-child relationships that Blender can group together
-  const hasColonNotation = inputFormat === 'obj' && 
+  const hasColonNotation = inputFormat === 'obj' &&
                            (outputFormat === 'glb' || outputFormat === 'gltf') &&
-                           !hasApsHierarchyData && // Only check file if no APS data
                            objHasColonNotationGroups(inputPath);
-  
-  const preferBlenderForHierarchy = hasApsHierarchyData || hasColonNotation;
-  
-  if (hasApsHierarchyData) {
-    log(`OBJ has APS hierarchy data - using Blender for GLB to preserve parent-child relationships`);
-  } else if (hasColonNotation) {
+
+  const preferBlenderForHierarchy = hasColonNotation;
+
+  if (hasColonNotation) {
     log(`OBJ has colon-notation groups - using Blender for GLB to create hierarchy`);
   }
 
   // 1. Try Assimp first (fast, good for simple meshes)
-  // Skip Assimp if we need hierarchy preservation or FBX output (Assimp FBX output is unreliable for reimport)
+  // Skip Assimp if we need hierarchy preservation, FBX output (unreliable for reimport),
+  // or glTF output (Assimp creates .gltf + external .bin which breaks single-file download)
   if (isSimpleMesh(inputFormat) && isSimpleMesh(outputFormat) && !preferBlenderForHierarchy
-      && outputFormat !== 'fbx') {
+      && outputFormat !== 'fbx' && outputFormat !== 'gltf') {
     try {
       log(`Trying Assimp...`);
       await assimpConvert(inputPath, outputPath);
@@ -1069,26 +1046,41 @@ async function convertWithFullFallback(
     }
   }
 
-  // 4. Try APS as ultimate fallback
-  if (isApsAvailable()) {
-    const tempObjPath = path.join(inputDir, `temp_aps_${Date.now()}.obj`);
+  // 4. Try via intermediate OBJ (when direct conversion fails)
+  // This handles cases like: 3DS→DXF (Blender can't import Assimp 3DS),
+  // DXF→glTF (Blender can't export glTF from DXF geometry), etc.
+  if (inputFormat !== 'obj' && outputFormat !== 'obj') {
+    const tempObjPath = path.join(inputDir, `temp_intermediate_${Date.now()}.obj`);
     try {
-      log(`Trying APS as last resort...`);
-      await apsConvert(inputPath, tempObjPath, { outputFormat: 'obj' });
-      log(`APS conversion to OBJ successful`, 'success');
-      
-      if (outputFormat === 'obj') {
-        await fs.move(tempObjPath, outputPath, { overwrite: true });
-        log(`Output is OBJ, done`, 'success');
+      log(`Trying via intermediate OBJ...`);
+      // Convert input → OBJ (try Assimp first, then Blender)
+      if (isSimpleMesh(inputFormat)) {
+        try {
+          await assimpConvert(inputPath, tempObjPath);
+        } catch {
+          await blenderConvert(inputPath, tempObjPath);
+        }
       } else {
-        log(`Converting OBJ → ${outputFormat.toUpperCase()} via Blender...`);
-        await blenderConvert(tempObjPath, outputPath);
-        log(`OBJ → ${outputFormat.toUpperCase()} successful`, 'success');
-        await fs.remove(tempObjPath).catch(() => {});
+        await blenderConvert(inputPath, tempObjPath);
       }
-      return 'aps';
+      log(`Input → OBJ successful, converting OBJ → ${outputFormat.toUpperCase()}...`, 'success');
+
+      // Convert OBJ → target (try Assimp first for mesh, then Blender)
+      if (isSimpleMesh(outputFormat) && outputFormat !== 'fbx' && outputFormat !== 'gltf') {
+        try {
+          await assimpConvert(tempObjPath, outputPath);
+          log(`OBJ → ${outputFormat.toUpperCase()} via Assimp successful`, 'success');
+          return 'pipeline';
+        } catch {
+          // Fall through to Blender
+        }
+      }
+      await blenderConvert(tempObjPath, outputPath);
+      log(`OBJ → ${outputFormat.toUpperCase()} via Blender successful`, 'success');
+      return 'pipeline';
     } catch (err) {
-      log(`APS failed: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error');
+      log(`Intermediate OBJ fallback failed: ${err instanceof Error ? err.message : 'Unknown error'}`, 'warn');
+    } finally {
       await fs.remove(tempObjPath).catch(() => {});
     }
   }
@@ -1097,7 +1089,7 @@ async function convertWithFullFallback(
   log(`All conversion methods failed!`, 'error');
   throw new ConversionError(
     `Failed to convert ${inputFormat.toUpperCase()} to ${outputFormat.toUpperCase()}`,
-    'All conversion methods failed (Assimp, Blender, FreeCAD, APS). ' +
+    'All conversion methods failed (Assimp, Blender, FreeCAD). ' +
     'The file may be corrupted or in an unsupported format.'
   );
 }
