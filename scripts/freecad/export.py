@@ -32,7 +32,7 @@ for p in freecad_paths:
 import FreeCAD
 import Part
 import Mesh
-import importDXF
+importDXF = None  # Lazy-loaded only when needed for DXF operations
 
 def main():
     input_path = os.environ.get("INPUT_FILE_PATH")
@@ -55,6 +55,9 @@ def main():
     try:
         # Import based on file type
         if input_ext == ".dxf":
+            global importDXF
+            if importDXF is None:
+                import importDXF
             importDXF.open(input_path)
         elif input_ext in (".step", ".stp"):
             Part.insert(input_path, doc.Name)

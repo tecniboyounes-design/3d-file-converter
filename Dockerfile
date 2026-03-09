@@ -1,176 +1,141 @@
 # syntax=docker/dockerfile:1
+#
+# Optimized 3D File Converter
+# Supports: OBJ, STL, FBX, PLY, glTF, GLB, DAE, 3DS, DXF, DWG, STEP, IGES, IFC
+# Platform: linux/amd64 (runs on Apple Silicon via Rosetta, native on x86_64 Linux)
 
 # ============================================================
-# IMPORTANT: This image targets linux/amd64 for Blender compatibility
-# Build with: docker build --platform linux/amd64 -t 3d-converter:optimized .
-# ============================================================
-
-# ============================================================
-# STAGE 0: IFCOPENSHELL SOURCE (for extracting IfcConvert binary)
+# STAGE 0: IfcOpenShell source (for IfcConvert binary + libs)
 # ============================================================
 FROM --platform=linux/amd64 aecgeeks/ifcopenshell:v0.8.0 AS ifcopenshell-source
 
 # ============================================================
-# STAGE 1: BUILD (Node.js dependencies + Frontend + TypeScript)
+# STAGE 1: FreeCAD library extraction
+# Install full FreeCAD, then extract ONLY the libraries we need.
+# This saves ~1.2GB vs installing freecad in the runtime stage.
+# ============================================================
+FROM --platform=linux/amd64 debian:bookworm-slim AS freecad-extract
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends freecad \
+    && rm -rf /var/lib/apt/lists/*
+
+# Extract FreeCAD core modules + Python modules + shared library deps
+RUN set -e && mkdir -p /fc/lib/freecad/lib /fc/share /fc/deps \
+    #
+    # FreeCAD core .so modules - resolve symlink chain:
+    # /usr/lib/freecad/lib -> /etc/alternatives/freecadlib -> /usr/lib/freecad-python3/lib
+    && cp -L /usr/lib/freecad/lib/*.so /fc/lib/freecad/lib/ \
+    && cp -rL /usr/lib/freecad/Ext /fc/lib/freecad/Ext 2>/dev/null || true \
+    && cp -rL /usr/lib/freecad/bin /fc/lib/freecad/bin 2>/dev/null || true \
+    #
+    # Also copy the core FreeCAD shared libraries (libFreeCADApp.so, etc.)
+    && cp -L /usr/lib/freecad-python3/lib/lib*.so* /fc/lib/freecad/lib/ 2>/dev/null || true \
+    #
+    # FreeCAD Python modules (Draft/importDXF, Part, Mesh, Ext)
+    && cp -a /usr/share/freecad /fc/share/freecad \
+    #
+    # Collect shared library deps (2 passes for transitive deps)
+    # Exclude base system libs that exist in debian:bookworm-slim
+    && SKIP='libc\.so\|libm\.so\|libpthread\|librt\.so\|libdl\.so\|libstdc\|libgcc_s\|ld-linux\|libz\.so\|libresolv\|libnss\|libnsl\|libcrypt' \
+    && for _pass in 1 2; do \
+         find /fc/lib -name '*.so*' -type f -exec ldd {} + 2>/dev/null \
+         | grep '=> /' | awk '{print $3}' | sort -u | grep -v "$SKIP" \
+         | while read -r lib; do \
+             bn=$(basename "$lib"); \
+             [ ! -f "/fc/deps/$bn" ] && cp -L "$lib" "/fc/deps/" 2>/dev/null || true; \
+           done; \
+       done
+
+# ============================================================
+# STAGE 2: Node.js application builder
 # ============================================================
 FROM --platform=linux/amd64 node:20-slim AS builder
 
 WORKDIR /app
 
-# Copy and build frontend
+# Build frontend
 COPY client ./client
 WORKDIR /app/client
 RUN npm ci && npm run build
 
-# Build server (TypeScript -> JavaScript)
+# Build server, then prune dev dependencies
 WORKDIR /app
 COPY server ./server
 WORKDIR /app/server
-RUN npm ci && npm run build
+RUN npm ci && npm run build && npm prune --omit=dev
 
 # ============================================================
-# STAGE 2: RUNTIME (Minimal production image)
+# STAGE 3: Production runtime (optimized)
 # ============================================================
 FROM --platform=linux/amd64 debian:bookworm-slim AS runtime
-
-# Avoid prompts during package installation
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install runtime dependencies in a single layer
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    # For Blender
-    libgl1-mesa-glx \
-    libxi6 \
-    libxrender1 \
-    libxkbcommon0 \
-    libxxf86vm1 \
-    libxfixes3 \
-    libxinerama1 \
-    libfontconfig1 \
-    libfreetype6 \
-    libsm6 \
-    libice6 \
-    # For ODA File Converter (QT dependencies - installed now for Task 02)
-    libglib2.0-0 \
-    libxext6 \
-    # Virtual framebuffer for ODA headless (xvfb + xauth required)
-    xvfb \
-    xauth \
-    # For Assimp
-    assimp-utils \
-    # General utilities
-    curl \
-    ca-certificates \
-    xz-utils \
-    && rm -rf /var/lib/apt/lists/* \
-    && apt-get clean
+# Copy Node.js binary from builder (saves ~140MB vs separate nodesource install)
+COPY --from=builder /usr/local/bin/node /usr/local/bin/
 
-# Install Node.js 20 LTS
-RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
-    && apt-get install -y --no-install-recommends nodejs \
-    && rm -rf /var/lib/apt/lists/* \
-    && apt-get clean
-
-# Verify Node installation
-RUN echo "NODE Version:" && node --version && echo "NPM Version:" && npm --version
-
-# Download Blender as portable binary (NOT apt-get - much smaller!)
-# Using Blender 4.0 LTS for stability
+# ALL system packages + Blender + ODA + Python packages in ONE layer
 ARG BLENDER_VERSION=4.0.2
-RUN curl -L https://download.blender.org/release/Blender4.0/blender-${BLENDER_VERSION}-linux-x64.tar.xz \
-    | tar -xJ -C /opt/ \
-    && ln -s /opt/blender-${BLENDER_VERSION}-linux-x64/blender /usr/local/bin/blender
-
-# Verify Blender installation
-RUN echo "BLENDER Version:" && blender --version
-
-# Verify Assimp installation
-RUN assimp version || echo "Assimp installed successfully"
-
-# ============================================================
-# INSTALL ODA FILE CONVERTER (for DWG <-> DXF conversions)
-# ============================================================
-# Using DEB package from official ODA website (version 26.12)
-# Qt runtimes are now bundled in the package
-
-# Install additional dependencies for ODA
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libxcb-util1 \
-    libxcb-icccm4 \
-    libxcb-image0 \
-    libxcb-keysyms1 \
-    libxcb-render-util0 \
-    libxcb-xinerama0 \
-    libxcb-xkb1 \
-    libxcb-shape0 \
-    libxkbcommon-x11-0 \
-    libegl1 \
-    libgl1 \
-    libdbus-1-3 \
-    && rm -rf /var/lib/apt/lists/* \
-    && apt-get clean
-
-# Create libxcb-util.so.0 symlink (required by ODA on modern Linux per official docs)
-RUN ln -sf /usr/lib/x86_64-linux-gnu/libxcb-util.so.1 /usr/lib/x86_64-linux-gnu/libxcb-util.so.0
-
-# Download and install ODA File Converter DEB package
-# Version 26.12 from official ODA website: https://www.opendesign.com/guestfiles/oda_file_converter
 ARG ODA_VERSION=27.1
-RUN set -eux; \
-    curl -fsSL -o /tmp/oda.deb \
-      "https://www.opendesign.com/guestfiles/get?filename=ODAFileConverter_QT6_lnxX64_8.3dll_${ODA_VERSION}.deb"; \
-    if ! dpkg -i /tmp/oda.deb; then \
-      i=1; \
-      while [ "$i" -le 3 ]; do \
-        if apt-get update && apt-get install -f -y --no-install-recommends; then \
-          break; \
-        fi; \
-        if [ "$i" -eq 3 ]; then \
-          exit 1; \
-        fi; \
-        sleep $((i * 5)); \
-        i=$((i + 1)); \
-      done; \
-      dpkg -i /tmp/oda.deb; \
-    fi; \
-    rm -f /tmp/oda.deb; \
-    rm -rf /var/lib/apt/lists/*
-
-# Verify ODA installation (the DEB installs to /usr/bin/ODAFileConverter which is a launcher script)
-RUN test -f /usr/bin/ODAFileConverter && echo "ODA File Converter installed successfully" \
-    && cat /usr/bin/ODAFileConverter
-
-# Create wrapper script for ODA (runs with xvfb for headless operation)
-RUN printf '#!/bin/bash\nxvfb-run -a /usr/bin/ODAFileConverter "$@"\n' > /usr/local/bin/oda-convert \
-    && chmod +x /usr/local/bin/oda-convert
-
-# ============================================================
-# INSTALL FREECAD (for ACIS 3D solid handling in DXF/DWG)
-# ============================================================
-# Use the Debian package but run via python with FreeCAD modules
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    freecad \
-    python3-pyside2.qtcore \
-    && rm -rf /var/lib/apt/lists/* \
-    && apt-get clean
+    # Display/rendering libs (Blender + ODA shared deps)
+    libgl1-mesa-glx libgl1 libegl1 libxi6 libxrender1 libxkbcommon0 \
+    libxxf86vm1 libxfixes3 libxinerama1 libfontconfig1 libfreetype6 \
+    libsm6 libice6 libglib2.0-0 libxext6 libdbus-1-3 \
+    # XCB libs (ODA Qt6 deps)
+    libxcb-util1 libxcb-icccm4 libxcb-image0 libxcb-keysyms1 \
+    libxcb-render-util0 libxcb-xinerama0 libxcb-xkb1 libxcb-shape0 \
+    libxkbcommon-x11-0 \
+    # Virtual framebuffer for headless rendering
+    xvfb xauth \
+    # Assimp 3D format converter
+    assimp-utils \
+    # Python runtime + pip (pip purged after install)
+    python3 python3-pip \
+    # System libs for IfcOpenShell (libsz2 needed by HDF5 for IfcConvert)
+    libxml2 libmpfr6 libgmp10 libtbb12 libtbbmalloc2 libsz2 \
+    # PySide2 for FreeCAD DXF import/export (Draft module dependency)
+    python3-pyside2.qtcore python3-pyside2.qtgui python3-pyside2.qtwidgets \
+    # Utilities
+    curl ca-certificates xz-utils \
+    \
+    # ---- Install Blender portable binary ----
+    && curl -sL "https://download.blender.org/release/Blender4.0/blender-${BLENDER_VERSION}-linux-x64.tar.xz" \
+       | tar -xJ -C /opt/ \
+    && ln -s "/opt/blender-${BLENDER_VERSION}-linux-x64/blender" /usr/local/bin/blender \
+    # Strip Blender: remove locales, tests, caches (~250MB savings)
+    && rm -rf "/opt/blender-${BLENDER_VERSION}-linux-x64/4.0/datafiles/locale" \
+              "/opt/blender-${BLENDER_VERSION}-linux-x64/4.0/python/lib/python3.10/test" \
+              "/opt/blender-${BLENDER_VERSION}-linux-x64/4.0/python/lib/python3.10/ensurepip" \
+              "/opt/blender-${BLENDER_VERSION}-linux-x64/license" \
+              "/opt/blender-${BLENDER_VERSION}-linux-x64/readme.html" \
+    && find "/opt/blender-${BLENDER_VERSION}-linux-x64" \( -name '__pycache__' -o -name '*.pyc' \) -exec rm -rf {} + 2>/dev/null; true \
+    \
+    # ---- Install ODA File Converter ----
+    && curl -fsSL -o /tmp/oda.deb \
+       "https://www.opendesign.com/guestfiles/get?filename=ODAFileConverter_QT6_lnxX64_8.3dll_${ODA_VERSION}.deb" \
+    && (dpkg -i /tmp/oda.deb || apt-get install -f -y --no-install-recommends) \
+    && rm -f /tmp/oda.deb \
+    \
+    # ---- Python packages (with no cache) ----
+    && pip3 install --no-cache-dir --break-system-packages numpy ifcopenshell ezdxf olefile \
+    \
+    # ---- Cleanup: purge build-only tools, remove caches ----
+    && apt-get purge -y python3-pip \
+    && apt-get autoremove -y --purge \
+    && rm -rf /var/lib/apt/lists/* /root/.cache /tmp/* \
+       /usr/share/doc /usr/share/man /usr/share/info /usr/share/lintian \
+    # ODA compatibility symlink
+    && ln -sf /usr/lib/x86_64-linux-gnu/libxcb-util.so.1 /usr/lib/x86_64-linux-gnu/libxcb-util.so.0
 
-# Create wrapper script for FreeCAD (uses Python with FreeCAD modules via xvfb)
-# The key is to use python3 with the FreeCAD path, not freecadcmd directly
-RUN printf '#!/bin/bash\nexport QT_QPA_PLATFORM=offscreen\nexport FREECAD_USER_HOME=/tmp/freecad\nmkdir -p /tmp/freecad\nxvfb-run -a python3 "$@"\n' > /usr/local/bin/freecad-convert \
-    && chmod +x /usr/local/bin/freecad-convert
+# ---- FreeCAD: minimal extracted libraries (saves ~1.2GB) ----
+# Paths match what Python scripts expect (/usr/lib/freecad/lib, /usr/share/freecad/Mod/*)
+COPY --from=freecad-extract /fc/lib/freecad /usr/lib/freecad
+COPY --from=freecad-extract /fc/share/freecad /usr/share/freecad
+# Isolated deps dir (loaded via LD_LIBRARY_PATH to avoid OCCT conflicts with IfcOpenShell)
+COPY --from=freecad-extract /fc/deps /opt/freecad/deps
 
-# Test that FreeCAD Python modules can be imported
-RUN xvfb-run -a python3 -c "import sys; sys.path.insert(0, '/usr/lib/freecad/lib'); import FreeCAD; print('FreeCAD', FreeCAD.Version())" || echo "FreeCAD modules check"
-
-# ============================================================
-# INSTALL IFCOPENSHELL (for IFC format support)
-# ============================================================
-# Copy IfcConvert binary from official IfcOpenShell image (multi-stage build)
+# ---- IfcOpenShell: binary + isolated shared libs ----
 COPY --from=ifcopenshell-source /usr/bin/IfcConvert /usr/local/bin/IfcConvert.bin
-
-# Copy required shared libraries to an ISOLATED directory to avoid
-# conflicts with system OpenCASCADE libs used by FreeCAD
-RUN mkdir -p /opt/ifcopenshell/lib
 COPY --from=ifcopenshell-source /lib/x86_64-linux-gnu/libTK*.so.7 /opt/ifcopenshell/lib/
 COPY --from=ifcopenshell-source /lib/x86_64-linux-gnu/libhdf5_serial*.so* /opt/ifcopenshell/lib/
 COPY --from=ifcopenshell-source /lib/x86_64-linux-gnu/libboost_program_options.so* /opt/ifcopenshell/lib/
@@ -178,63 +143,39 @@ COPY --from=ifcopenshell-source /lib/x86_64-linux-gnu/libboost_regex.so* /opt/if
 COPY --from=ifcopenshell-source /lib/x86_64-linux-gnu/libtbb*.so* /opt/ifcopenshell/lib/
 COPY --from=ifcopenshell-source /lib/x86_64-linux-gnu/libicu*.so* /opt/ifcopenshell/lib/
 
-# Create wrapper script for IfcConvert that uses isolated libraries
-RUN printf '#!/bin/bash\nLD_LIBRARY_PATH=/opt/ifcopenshell/lib:$LD_LIBRARY_PATH exec /usr/local/bin/IfcConvert.bin "$@"\n' \
-    > /usr/local/bin/IfcConvert && chmod +x /usr/local/bin/IfcConvert
+# ---- Wrapper scripts ----
+RUN printf '#!/bin/bash\nxvfb-run -a /usr/bin/ODAFileConverter "$@"\n' > /usr/local/bin/oda-convert \
+    && chmod +x /usr/local/bin/oda-convert \
+    #
+    # FreeCAD wrapper: loads isolated OCCT deps via LD_LIBRARY_PATH
+    && printf '#!/bin/bash\nexport QT_QPA_PLATFORM=offscreen\nexport FREECAD_USER_HOME=/tmp/freecad\nmkdir -p /tmp/freecad\nexport LD_LIBRARY_PATH=/opt/freecad/deps:$LD_LIBRARY_PATH\nxvfb-run -a python3 "$@"\n' > /usr/local/bin/freecad-convert \
+    && chmod +x /usr/local/bin/freecad-convert \
+    #
+    # IfcConvert wrapper: loads isolated IfcOpenShell deps
+    && printf '#!/bin/bash\nLD_LIBRARY_PATH=/opt/ifcopenshell/lib:$LD_LIBRARY_PATH exec /usr/local/bin/IfcConvert.bin "$@"\n' \
+       > /usr/local/bin/IfcConvert && chmod +x /usr/local/bin/IfcConvert \
+    && ldconfig
 
-# Install IfcOpenShell Python library and remaining runtime dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3-pip \
-    libxml2 \
-    libmpfr6 \
-    libgmp10 \
-    libtbb12 \
-    libtbbmalloc2 \
-    && pip3 install --break-system-packages ifcopenshell ezdxf olefile \
-    && ldconfig \
-    && rm -rf /var/lib/apt/lists/* \
-    && apt-get clean
-
-# Verify IfcConvert installation
-RUN IfcConvert --version || echo "IfcConvert binary installed"
-RUN python3 -c "import ifcopenshell; print('IfcOpenShell Python:', ifcopenshell.version)" || echo "IfcOpenShell Python installed"
-
-# ============================================================
-# COPY APPLICATION
-# ============================================================
+# ---- Application ----
 WORKDIR /usr/src/app
-
-# Copy built assets from builder stage
 COPY --from=builder /app/client/dist ./client/dist
 COPY --from=builder /app/server/dist ./server/dist
 COPY --from=builder /app/server/node_modules ./server/node_modules
-
-# Copy server package.json (for module resolution) and scripts
 COPY server/package.json ./server/
 COPY scripts ./scripts
 COPY package.json ./
-
-# Create uploads directory with proper permissions
 RUN mkdir -p data/uploads && chmod 755 data/uploads
 
-# ============================================================
-# ENVIRONMENT & STARTUP
-# ============================================================
-ENV NODE_ENV=production
-ENV PORT=3001
-
-# Concurrency limits (prevent OOM)
-ENV MAX_CONCURRENT_BLENDER=2
-ENV MAX_CONCURRENT_ASSIMP=5
-
-# Conversion timeout (5 minutes)
-ENV CONVERSION_TIMEOUT=300000
+# ---- Environment ----
+ENV NODE_ENV=production \
+    PORT=3001 \
+    MAX_CONCURRENT_BLENDER=2 \
+    MAX_CONCURRENT_ASSIMP=5 \
+    CONVERSION_TIMEOUT=300000
 
 EXPOSE 3001
 
-# Health check - checks readiness endpoint including tool availability
 HEALTHCHECK --interval=30s --timeout=15s --start-period=60s --retries=3 \
     CMD curl -sf http://localhost:3001/ready | grep -q '"status":"ready"' || exit 1
 
-# Start the Fastify server (TypeScript compiled to dist/)
 CMD ["node", "server/dist/server.js"]

@@ -33,7 +33,7 @@ for p in freecad_paths:
 
 import FreeCAD
 import Part
-import importDXF
+importDXF = None  # Lazy-loaded only when needed for DXF operations
 
 
 def load_cad_file(file_path, doc):
@@ -52,7 +52,10 @@ def load_cad_file(file_path, doc):
     print(f"[FreeCAD] Loading {ext.upper()} file...")
     
     if ext == ".dxf":
-        # DXF requires special importer
+        # DXF requires special importer (lazy import to avoid PySide dependency)
+        global importDXF
+        if importDXF is None:
+            import importDXF
         importDXF.open(file_path)
         # importDXF.open creates a new document, get the active one
         doc = FreeCAD.ActiveDocument
@@ -170,7 +173,10 @@ def export_cad_file(shape, file_path):
         feature = doc.addObject("Part::Feature", "ExportShape")
         feature.Shape = shape
         
-        # Export using importDXF
+        # Export using importDXF (lazy import)
+        global importDXF
+        if importDXF is None:
+            import importDXF
         importDXF.export([feature], file_path)
         
     elif ext == ".brep":
